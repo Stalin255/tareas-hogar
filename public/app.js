@@ -2,10 +2,22 @@ const socket = io({ transports: ['websocket', 'polling'] });
 const $ = selector => document.querySelector(selector);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EDIT_PASSWORD = 'leo123';
-const storedProfile = (() => { try { return JSON.parse(localStorage.getItem('tareas-profile') || 'null'); } catch { return null; } })();
+const ECUADOR_HOLIDAYS = [
+  { date: '2026-12-25', name: 'Navidad' },
+  { date: '2027-01-01', name: 'Año Nuevo' },
+  { date: '2027-02-08', name: 'Carnaval' }, { date: '2027-02-09', name: 'Carnaval' },
+  { date: '2027-03-26', name: 'Viernes Santo' },
+  { date: '2027-04-30', name: 'Día del Trabajo · descanso trasladado' },
+  { date: '2027-05-24', name: 'Batalla de Pichincha' },
+  { date: '2027-08-09', name: 'Primer Grito de Independencia · descanso trasladado' },
+  { date: '2027-10-08', name: 'Independencia de Guayaquil · descanso trasladado' },
+  { date: '2027-11-01', name: 'Independencia de Cuenca · descanso trasladado' },
+  { date: '2027-11-02', name: 'Día de los Difuntos' },
+  { date: '2027-12-25', name: 'Navidad' }
+];
 const deviceId = localStorage.getItem('tareas-device-id') || (crypto.randomUUID ? crypto.randomUUID() : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 localStorage.setItem('tareas-device-id', deviceId);
-const state = { data: null, profile: null, isGuest: false, editTask: null, selectedZone: null, roleZoneId: null, pendingAbsenceZone: null, notesZoneId: null, toastTimer: null, reminderKey: '' };
+const state = { data: null, profile: null, isGuest: false, editTask: null, deleteTask: null, adminPassword: '', selectedZone: null, roleZoneId: null, pendingAbsenceZone: null, notesZoneId: null, toastTimer: null, reminderKey: '' };
 const icons = { arriba: '🧺', afuera: '🌿', cocina: '🍋', sala: '🛋️', bano: '🧼' };
 const personColors = { made: '#06b6d4', maciel: '#a855f7', leo: '#22c55e', mati: '#3b82f6', libro: '#f97316', angel: '#fb923c', 'libro y angel': '#f97316' };
 
@@ -58,6 +70,9 @@ function render() {
   $('#guest-status').classList.toggle('hidden', !state.isGuest);
   $('#notify-btn').classList.toggle('hidden', state.isGuest);
   $('#add-task-btn').classList.toggle('hidden', state.isGuest);
+  $('#devices-btn').classList.toggle('hidden', state.isGuest || !mine);
+  $('#manage-tasks-btn').classList.toggle('hidden', state.isGuest || !mine);
+  $('#add-reminder-btn').classList.toggle('hidden', state.isGuest || !mine);
   document.body.classList.toggle('guest-mode', state.isGuest);
 
   const total = data.zones.reduce((sum, zone) => sum + zone.tasks.length, 0);
@@ -68,7 +83,8 @@ function render() {
   $('#progress-percent').textContent = `${percent}%`; $('#progress-ring').style.setProperty('--progress', `${percent * 3.6}deg`);
   $('#zones').innerHTML = data.zones.map(renderZone).join('');
   document.querySelectorAll('.zone-card').forEach((card, index) => { card.style.animationDelay = `${index * 70}ms`; });
-  renderHistory(); renderNotice(); renderDrawAnnouncement(); renderZonePicker();
+  renderHistory(); renderReminders(); renderHolidays(); renderNotice(); renderDrawAnnouncement(); renderZonePicker();
+  if ($('#task-manager-dialog').open) renderTaskManager();
   if (state.notesZoneId && $('#notes-dialog').open) renderNotes(state.notesZoneId);
   $('#history-count').textContent = String(data.history.length);
 }
@@ -82,7 +98,7 @@ function renderZone(zone) {
   const streakLabel = responsibleNames.length ? responsibleNames.map(person => `${person} ${state.data.streaks[person] || 0}`).join(' · ') : 'Sin responsable';
   return `<article class="zone-card ${zone.permission ? 'permission' : ''}" style="--accent:${accent}">
     <div class="zone-head"><div class="zone-identity"><div class="zone-icon">${icons[zone.id] || '⌂'}</div><div class="zone-copy"><div class="zone-title">${escapeHtml(zone.name)}</div><div class="zone-person">${escapeHtml(personLabel)} <span class="person-streak">🔥 ${escapeHtml(streakLabel)}</span></div></div></div>
-      ${state.isGuest ? '' : `<div class="zone-tools"><span class="permission-label">Ausente</span><input class="permission-toggle" type="checkbox" aria-label="Permiso o ausente ${escapeHtml(zone.name)}" data-permission="${escapeHtml(zone.id)}" ${zone.permission ? 'checked' : ''}></div>`}</div>
+      ${isOwn ? `<div class="zone-tools"><span class="permission-label">Ausente</span><input class="permission-toggle" type="checkbox" aria-label="Permiso o ausente ${escapeHtml(zone.name)}" data-permission="${escapeHtml(zone.id)}" ${zone.permission ? 'checked' : ''}></div>` : ''}</div>
     <div class="zone-progress"><span>${zone.permission ? 'Con permiso hoy' : pending ? `Faltan ${pending} de ${zone.tasks.length}` : '¡Todo listo!'}</span><strong>${progress}%</strong></div>
     <div class="bar"><i style="width:${progress}%"></i></div>
     <button class="notes-button" type="button" data-notes-zone="${escapeHtml(zone.id)}">📝 Notas <span>${zone.notes?.length || 0}</span></button>
@@ -91,7 +107,6 @@ function renderZone(zone) {
       <span class="task-check-wrap">${isOwn ? `<input type="checkbox" class="task-check" aria-label="Marcar ${escapeHtml(task.text)}" data-toggle-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}" ${task.done ? 'checked' : ''}>` : `<input type="checkbox" class="task-check blocked-check" aria-label="${task.done ? 'Completada' : 'Pendiente'}: ${escapeHtml(task.text)}" ${task.done ? 'checked' : ''} disabled>${state.isGuest ? '' : '<button type="button" class="task-lock-hit" data-locked-check aria-label="Solo puedes marcar las actividades de tu propio rol"></button>'}`}</span>
       <div class="task-detail"><div class="task-text">${escapeHtml(task.text)}</div>${task.done ? `<div class="task-meta">✓ ${escapeHtml(task.markedBy || '')} · ${escapeHtml(task.markedAt || '')}</div>` : ''}</div>
       ${!state.isGuest && !task.done && !zone.permission ? `<button class="mini-button nudge-button" title="Dar un toque a ${escapeHtml(zone.person)}" aria-label="Dar un toque" data-nudge-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}">🔔</button>` : ''}
-      ${state.isGuest ? '' : `<div class="task-actions"><button class="mini-button edit-button" title="Editar tarea" aria-label="Editar tarea" data-edit-task-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}">✏️</button></div>`}
     </li>`).join('')}</ul>
   </article>`;
 }
@@ -99,6 +114,44 @@ function renderHistory() {
   const list = $('#history-list');
   if (!state.data.history.length) { list.innerHTML = '<div class="empty-history">✨ Aún no hay tareas pendientes en el historial.</div>'; return; }
   list.innerHTML = state.data.history.map(item => `<article class="history-item ${item.type === 'permiso' ? 'permission-history' : ''}"><div class="history-top"><div><span class="history-person">${escapeHtml(item.person)}</span><div class="history-zone">${escapeHtml(item.zone)}</div></div><time>${escapeHtml(item.date)}</time></div>${item.type === 'permiso' ? `<div class="history-permission">☀️ Ausente con permiso</div><p class="history-reason"><strong>Motivo:</strong> ${escapeHtml(item.reason || 'Sin motivo registrado')}</p>` : `<ul>${(item.tasks || []).map(task => `<li>${escapeHtml(task)}</li>`).join('')}</ul>`}</article>`).join('');
+}
+function formatDate(date) {
+  return new Intl.DateTimeFormat('es-EC', { timeZone: 'America/Guayaquil', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(`${date}T12:00:00Z`));
+}
+function daysUntil(date) { return Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${state.data.date}T00:00:00Z`)) / DAY_MS); }
+function renderReminders() {
+  const list = $('#reminders-list');
+  const reminders = [...(state.data.reminders || [])].sort((a, b) => a.date.localeCompare(b.date));
+  if (!reminders.length) { list.innerHTML = '<div class="empty-agenda">Aún no hay fechas pendientes. Puedes añadir una para toda la familia.</div>'; return; }
+  list.innerHTML = reminders.map(item => {
+    const left = daysUntil(item.date);
+    const timing = left < 0 ? `Venció hace ${Math.abs(left)} días` : left === 0 ? 'Es hoy' : left === 1 ? 'Mañana' : `Faltan ${left} días`;
+    return `<article class="reminder-card ${left >= 0 && left <= 7 ? 'reminder-soon' : ''} ${left < 0 ? 'reminder-overdue' : ''}"><div class="reminder-pin">📌</div><div class="reminder-copy"><strong>${escapeHtml(item.title)}</strong><span>${formatDate(item.date)} · Añadió ${escapeHtml(item.createdBy || 'la familia')}</span></div><div class="reminder-countdown">${escapeHtml(timing)}</div></article>`;
+  }).join('');
+}
+function renderHolidays() {
+  const list = $('#holidays-list'), upcoming = ECUADOR_HOLIDAYS.filter(item => item.date >= state.data.date);
+  if (!upcoming.length) { list.innerHTML = '<div class="empty-agenda">No hay más fechas cargadas.</div>'; return; }
+  list.innerHTML = upcoming.map((item, index) => `<article class="holiday-row"><span class="holiday-date">${formatDate(item.date)}</span><strong>${escapeHtml(item.name)}</strong><span class="holiday-count">${daysUntil(item.date) === 0 ? 'Hoy' : `en ${daysUntil(item.date)} días`}</span></article>`).join('');
+}
+function renderTaskManager() {
+  const zoneId = $('#manage-task-zone').value || state.data.zones[0]?.id;
+  const zone = state.data.zones.find(item => item.id === zoneId);
+  if (!zone) return;
+  $('#managed-task-list').innerHTML = zone.tasks.length ? zone.tasks.map(task => `<article class="managed-task-row"><span>${escapeHtml(task.text)}</span><div><button class="mini-button" type="button" title="Editar" data-manager-edit-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}">✏️</button><button class="mini-button remove-task-button" type="button" title="Eliminar" data-manager-delete-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}">🗑️</button></div></article>`).join('') : '<div class="empty-agenda">Esta zona todavía no tiene tareas.</div>';
+}
+function renderDeviceList() {
+  const list = $('#device-list'), profiles = state.deviceProfiles || [];
+  if (!profiles.length) { list.innerHTML = '<div class="empty-agenda">No hay dispositivos vinculados.</div>'; return; }
+  list.innerHTML = `<div class="device-list-heading">${profiles.length} dispositivo${profiles.length === 1 ? '' : 's'} vinculados</div>${profiles.map(profile => {
+    const zone = state.data.zones.find(item => item.id === profile.zoneId);
+    return `<article class="device-row"><div><strong>${escapeHtml(profile.name)}</strong><span>${escapeHtml(zone?.name || 'Rol no encontrado')}</span></div><button class="secondary-button device-remove" type="button" data-remove-device="${escapeHtml(profile.deviceId)}">Quitar</button></article>`;
+  }).join('')}<button id="unlink-all-devices" class="secondary-button unlink-all-button" type="button">Desvincular todos</button>`;
+}
+async function loadDeviceList() {
+  const result = await api('/api/profile/list', request('POST', { password: state.adminPassword }));
+  state.deviceProfiles = result.profiles;
+  renderDeviceList();
 }
 function renderNotice() {
   const banner = $('#yesterday-banner'), notice = !state.isGuest && state.profile && state.data.notices[state.profile.name];
@@ -141,6 +194,12 @@ socket.on('state', data => { state.data = data; render(); });
 socket.on('profile', profile => {
   if (!state.isGuest && profile.deviceId === deviceId) { state.profile = { name: profile.name, zoneId: profile.zoneId, deviceId }; localStorage.setItem('tareas-profile', JSON.stringify(state.profile)); render(); }
 });
+socket.on('profile-unlinked', () => {
+  if (state.isGuest) return;
+  state.profile = null; localStorage.removeItem('tareas-profile'); socket.emit('forget-profile'); render();
+  state.selectedZone = state.data?.zones[0]?.id || null;
+  if (!$('#profile-dialog').open) { renderZonePicker(); $('#profile-dialog').showModal(); }
+});
 socket.on('identity-error', payload => say(payload.error));
 socket.on('nudge', payload => {
   const recipients = payload.persons || [payload.person];
@@ -157,6 +216,7 @@ socket.on('nudge', payload => {
 });
 
 document.addEventListener('change', async event => {
+  if (event.target.id === 'manage-task-zone') { renderTaskManager(); return; }
   const toggle = event.target.closest('[data-toggle-zone]');
   if (!toggle) return;
   if (state.isGuest) { render(); return; }
@@ -173,6 +233,73 @@ document.addEventListener('click', async event => {
     render();
     say('Modo invitado: solo puedes mirar.');
     return;
+  }
+  if (event.target.closest('#devices-btn')) {
+    if (state.isGuest) return;
+    state.deviceProfiles = []; state.adminPassword = '';
+    $('#devices-password').value = ''; $('#devices-error').classList.add('hidden'); $('#device-list').innerHTML = '';
+    $('#devices-dialog').showModal();
+  }
+  if (event.target.closest('#manage-tasks-btn')) {
+    if (state.isGuest || !state.profile) return;
+    $('#manage-task-zone').innerHTML = state.data.zones.map(zone => `<option value="${escapeHtml(zone.id)}">${escapeHtml(zone.name)}</option>`).join('');
+    renderTaskManager(); $('#task-manager-dialog').showModal();
+  }
+  if (event.target.closest('#manager-add-task')) {
+    if (state.isGuest || !state.profile) return;
+    const zoneId = $('#manage-task-zone').value;
+    closeDialog($('#task-manager-dialog'));
+    setTimeout(() => { state.editTask = null; $('#task-dialog-title').textContent = 'Añadir una tarea'; $('#task-form').reset(); $('#task-zone').disabled = false; $('#task-zone').value = zoneId; $('#task-password').required = false; $('#task-password-field').classList.add('hidden'); $('#task-error').classList.add('hidden'); renderZonePicker(); $('#task-zone').value = zoneId; $('#task-dialog').showModal(); }, 280);
+  }
+  const managerEdit = event.target.closest('[data-manager-edit-zone]');
+  if (managerEdit) {
+    if (state.isGuest) return;
+    state.editTask = { zoneId: managerEdit.dataset.managerEditZone, taskId: managerEdit.dataset.task };
+    const task = state.data.zones.find(zone => zone.id === state.editTask.zoneId)?.tasks.find(item => item.id === state.editTask.taskId);
+    if (!task) return;
+    closeDialog($('#task-manager-dialog'));
+    setTimeout(() => { $('#task-dialog-title').textContent = 'Editar tarea'; $('#task-zone').value = state.editTask.zoneId; $('#task-zone').disabled = true; $('#task-text').value = task.text; $('#task-password').value = ''; $('#task-password').required = true; $('#task-password-field').classList.remove('hidden'); $('#task-error').classList.add('hidden'); $('#task-dialog').showModal(); }, 280);
+  }
+  const managerDelete = event.target.closest('[data-manager-delete-zone]');
+  if (managerDelete) {
+    if (state.isGuest) return;
+    state.deleteTask = { zoneId: managerDelete.dataset.managerDeleteZone, taskId: managerDelete.dataset.task };
+    const task = state.data.zones.find(zone => zone.id === state.deleteTask.zoneId)?.tasks.find(item => item.id === state.deleteTask.taskId);
+    $('#delete-task-label').textContent = task ? task.text : '';
+    $('#task-delete-password').value = ''; $('#task-delete-error').classList.add('hidden'); $('#task-delete-dialog').showModal();
+  }
+  const removeDevice = event.target.closest('[data-remove-device]');
+  if (removeDevice) {
+    if (state.isGuest || !state.adminPassword) return;
+    try {
+      const result = await api('/api/profile/unlink', request('POST', { deviceId: removeDevice.dataset.removeDevice, password: state.adminPassword }));
+      state.data = result.state; render();
+      if (removeDevice.dataset.removeDevice === deviceId) {
+        state.profile = null; localStorage.removeItem('tareas-profile'); socket.emit('forget-profile'); render();
+        closeDialog($('#devices-dialog')); state.selectedZone = state.data.zones[0]?.id || null;
+        setTimeout(() => { renderZonePicker(); if (!$('#profile-dialog').open) $('#profile-dialog').showModal(); }, 280);
+      } else await loadDeviceList();
+    } catch (error) { say(error.message); }
+  }
+  if (event.target.closest('#unlink-all-devices')) {
+    if (state.isGuest || !state.adminPassword) return;
+    if (!window.confirm('¿Desvincular todos los dispositivos y dejar libres sus roles?')) return;
+    const hadProfile = Boolean(state.profile);
+    try {
+      const result = await api('/api/profile/unlink-all', request('POST', { password: state.adminPassword }));
+      state.data = result.state; state.deviceProfiles = []; renderDeviceList(); render();
+      closeDialog($('#devices-dialog'));
+      if (hadProfile) {
+        state.profile = null; localStorage.removeItem('tareas-profile'); socket.emit('forget-profile'); render();
+        state.selectedZone = state.data.zones[0]?.id || null;
+        setTimeout(() => { renderZonePicker(); if (!$('#profile-dialog').open) $('#profile-dialog').showModal(); }, 280);
+      } else say('Todos los dispositivos quedaron desvinculados.');
+    } catch (error) { say(error.message); }
+  }
+  if (event.target.closest('#add-reminder-btn')) {
+    if (state.isGuest || !state.profile) return say('Vincula un perfil para añadir fechas.');
+    $('#reminder-form').reset(); $('#reminder-date').min = state.data.date; $('#reminder-date').value = state.data.date;
+    $('#reminder-error').classList.add('hidden'); $('#reminder-dialog').showModal();
   }
   const quickName = event.target.closest('[data-name]');
   if (quickName) $('#person-input').value = quickName.dataset.name;
@@ -205,13 +332,6 @@ document.addEventListener('click', async event => {
     nudge.classList.remove('ringing'); void nudge.offsetWidth; nudge.classList.add('ringing');
     socket.emit('nudge', { zoneId: nudge.dataset.nudgeZone, taskId: nudge.dataset.task, from: state.profile?.name || 'Alguien' });
     say(`Toque enviado a ${state.data.zones.find(zone => zone.id === nudge.dataset.nudgeZone)?.person}.`);
-  }
-  const edit = event.target.closest('[data-edit-task-zone]');
-  if (edit) {
-    if (state.isGuest) return;
-    state.editTask = { zoneId: edit.dataset.editTaskZone, taskId: edit.dataset.task };
-    const task = state.data.zones.find(zone => zone.id === state.editTask.zoneId).tasks.find(item => item.id === state.editTask.taskId);
-    $('#task-dialog-title').textContent = 'Editar tarea'; $('#task-zone').value = state.editTask.zoneId; $('#task-zone').disabled = true; $('#task-text').value = task.text; $('#task-password').value = ''; $('#task-password').required = true; $('#task-password-field').classList.remove('hidden'); $('#task-error').classList.add('hidden'); $('#task-dialog').showModal();
   }
   if (event.target.closest('#add-task-btn')) {
     if (state.isGuest) return;
@@ -274,15 +394,41 @@ $('#unlink-form').addEventListener('submit', async event => {
     setTimeout(() => { renderZonePicker(); $('#profile-error').classList.add('hidden'); $('#profile-dialog').showModal(); }, 280);
   } catch (error) { say(error.message); }
 });
+$('#devices-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const password = $('#devices-password').value;
+  if (password !== EDIT_PASSWORD) { $('#devices-error').textContent = 'Contraseña incorrecta.'; $('#devices-error').classList.remove('hidden'); return; }
+  state.adminPassword = password;
+  try { await loadDeviceList(); $('#devices-error').classList.add('hidden'); }
+  catch (error) { $('#devices-error').textContent = error.message; $('#devices-error').classList.remove('hidden'); }
+});
+$('#task-delete-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if ($('#task-delete-password').value !== EDIT_PASSWORD) { $('#task-delete-error').textContent = 'Contraseña incorrecta.'; $('#task-delete-error').classList.remove('hidden'); return; }
+  if (!state.deleteTask || !state.profile || state.isGuest) return;
+  try {
+    const result = await api(`/api/task/${encodeURIComponent(state.deleteTask.zoneId)}/${encodeURIComponent(state.deleteTask.taskId)}`, request('DELETE', { deviceId, password: $('#task-delete-password').value }));
+    state.data = result; $('#task-delete-password').value = ''; closeDialog($('#task-delete-dialog')); render(); say('Tarea eliminada.');
+  } catch (error) { $('#task-delete-error').textContent = error.message; $('#task-delete-error').classList.remove('hidden'); }
+});
+$('#reminder-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!state.profile || state.isGuest) return say('Vincula un perfil para añadir fechas.');
+  const title = $('#reminder-title').value.trim(), date = $('#reminder-date').value;
+  try {
+    const result = await api('/api/reminders', request('POST', { title, date, deviceId }));
+    state.data = result.state; closeDialog($('#reminder-dialog')); render(); say('Recordatorio añadido para toda la familia.');
+  } catch (error) { $('#reminder-error').textContent = error.message; $('#reminder-error').classList.remove('hidden'); }
+});
 $('#task-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (state.isGuest || !state.profile) return say('Vincula un perfil para modificar tareas.');
   if (state.editTask && $('#task-password').value !== EDIT_PASSWORD) { $('#task-error').textContent = 'Contraseña incorrecta.'; $('#task-error').classList.remove('hidden'); return; }
   const zoneId = $('#task-zone').value, text = $('#task-text').value.trim();
   try {
-    if (state.editTask) await api(`/api/task/${encodeURIComponent(state.editTask.zoneId)}/${encodeURIComponent(state.editTask.taskId)}`, request('PATCH', { text, password: $('#task-password').value, deviceId }));
-    else await api('/api/task', request('POST', { zoneId, text, deviceId }));
-    $('#task-password').value = ''; closeDialog($('#task-dialog'));
+    if (state.editTask) state.data = await api(`/api/task/${encodeURIComponent(state.editTask.zoneId)}/${encodeURIComponent(state.editTask.taskId)}`, request('PATCH', { text, password: $('#task-password').value, deviceId }));
+    else { await api('/api/task', request('POST', { zoneId, text, deviceId })); state.data = await api('/api/state'); }
+    state.editTask = null; $('#task-password').value = ''; closeDialog($('#task-dialog')); render();
   } catch (error) { $('#task-error').textContent = error.message; $('#task-error').classList.remove('hidden'); }
 });
 $('#permission-form').addEventListener('submit', async event => {
@@ -312,6 +458,7 @@ for (const dialog of document.querySelectorAll('dialog')) {
 }
 $('#permission-dialog').addEventListener('close', () => { state.pendingAbsenceZone = null; });
 $('#notes-dialog').addEventListener('close', () => { state.notesZoneId = null; });
+$('#devices-dialog').addEventListener('close', () => { state.adminPassword = ''; state.deviceProfiles = []; $('#devices-password').value = ''; $('#device-list').innerHTML = ''; });
 $('#notify-btn').addEventListener('click', async () => {
   if (state.isGuest) return;
   if (!('Notification' in window)) return say('Este navegador no admite notificaciones.');
@@ -347,12 +494,9 @@ async function initialize() {
     let result;
     try { result = await api('/api/profile/claim', request('POST', { deviceId })); }
     catch (error) {
-      if (error.status !== 400 || !storedProfile?.name || !storedProfile?.zoneId) {
-        if (error.status === 400) { state.selectedZone = state.data.zones[0]?.id || null; renderZonePicker(); $('#profile-dialog').showModal(); }
-        else say(error.message);
-        return;
-      }
-      result = await api('/api/profile/claim', request('POST', { deviceId, name: storedProfile.name, zoneId: storedProfile.zoneId }));
+      if (error.status === 400 || error.status === 409) { localStorage.removeItem('tareas-profile'); state.selectedZone = state.data.zones[0]?.id || null; renderZonePicker(); $('#profile-dialog').showModal(); }
+      else say(error.message);
+      return;
     }
     state.data = result.state; syncProfile(result.profile); render();
   } catch (error) {
