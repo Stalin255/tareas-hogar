@@ -5,7 +5,7 @@ const EDIT_PASSWORD = 'leo123';
 const storedProfile = (() => { try { return JSON.parse(localStorage.getItem('tareas-profile') || 'null'); } catch { return null; } })();
 const deviceId = localStorage.getItem('tareas-device-id') || (crypto.randomUUID ? crypto.randomUUID() : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 localStorage.setItem('tareas-device-id', deviceId);
-const state = { data: null, profile: null, editTask: null, selectedZone: null, roleZoneId: null, pendingAbsenceZone: null, notesZoneId: null, toastTimer: null, reminderKey: '' };
+const state = { data: null, profile: null, isGuest: false, editTask: null, selectedZone: null, roleZoneId: null, pendingAbsenceZone: null, notesZoneId: null, toastTimer: null, reminderKey: '' };
 const icons = { arriba: '🧺', afuera: '🌿', cocina: '🍋', sala: '🛋️', bano: '🧼' };
 const personColors = { made: '#06b6d4', maciel: '#a855f7', leo: '#22c55e', mati: '#3b82f6', libro: '#f97316', angel: '#fb923c', 'libro y angel': '#f97316' };
 
@@ -42,9 +42,9 @@ function closeDialog(dialog) {
 }
 function render() {
   if (!state.data) return;
-  const data = state.data, mine = state.profile;
+  const data = state.data, mine = state.isGuest ? null : state.profile;
   const myZone = mine && data.zones.find(zone => zone.id === mine.zoneId);
-  $('#hello-name').textContent = mine?.name || 'familia';
+  $('#hello-name').textContent = state.isGuest ? 'invitado' : mine?.name || 'familia';
   $('#avatar').textContent = (mine?.name || '?').slice(0, 1).toUpperCase();
   $('#today-label').textContent = new Intl.DateTimeFormat('es-EC', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
   $('#year').textContent = new Date().getFullYear();
@@ -54,6 +54,11 @@ function render() {
   $('#cycle-indicator').classList.toggle('hidden', !mine);
   $('#role-change-btn').classList.toggle('hidden', !mine);
   $('#unlink-btn').classList.toggle('hidden', !mine);
+  $('#guest-btn').classList.toggle('hidden', state.isGuest);
+  $('#guest-status').classList.toggle('hidden', !state.isGuest);
+  $('#notify-btn').classList.toggle('hidden', state.isGuest);
+  $('#add-task-btn').classList.toggle('hidden', state.isGuest);
+  document.body.classList.toggle('guest-mode', state.isGuest);
 
   const total = data.zones.reduce((sum, zone) => sum + zone.tasks.length, 0);
   const done = data.zones.reduce((sum, zone) => sum + zone.tasks.filter(task => task.done).length, 0);
@@ -71,22 +76,22 @@ function renderZone(zone) {
   const complete = zone.tasks.filter(task => task.done).length;
   const pending = zone.tasks.length - complete;
   const progress = zone.tasks.length ? Math.round(complete / zone.tasks.length * 100) : 0;
-  const accent = colorFor(zone.person), isOwn = Boolean(state.profile && state.profile.zoneId === zone.id);
+  const accent = colorFor(zone.person), isOwn = Boolean(!state.isGuest && state.profile && state.profile.zoneId === zone.id);
   const responsibleNames = Array.isArray(zone.responsables) ? zone.responsables : (zone.person ? [zone.person] : []);
   const personLabel = zone.person || 'Sin responsable';
   const streakLabel = responsibleNames.length ? responsibleNames.map(person => `${person} ${state.data.streaks[person] || 0}`).join(' · ') : 'Sin responsable';
   return `<article class="zone-card ${zone.permission ? 'permission' : ''}" style="--accent:${accent}">
     <div class="zone-head"><div class="zone-identity"><div class="zone-icon">${icons[zone.id] || '⌂'}</div><div class="zone-copy"><div class="zone-title">${escapeHtml(zone.name)}</div><div class="zone-person">${escapeHtml(personLabel)} <span class="person-streak">🔥 ${escapeHtml(streakLabel)}</span></div></div></div>
-      <div class="zone-tools"><span class="permission-label">Ausente</span><input class="permission-toggle" type="checkbox" aria-label="Permiso o ausente ${escapeHtml(zone.name)}" data-permission="${escapeHtml(zone.id)}" ${zone.permission ? 'checked' : ''}></div></div>
+      ${state.isGuest ? '' : `<div class="zone-tools"><span class="permission-label">Ausente</span><input class="permission-toggle" type="checkbox" aria-label="Permiso o ausente ${escapeHtml(zone.name)}" data-permission="${escapeHtml(zone.id)}" ${zone.permission ? 'checked' : ''}></div>`}</div>
     <div class="zone-progress"><span>${zone.permission ? 'Con permiso hoy' : pending ? `Faltan ${pending} de ${zone.tasks.length}` : '¡Todo listo!'}</span><strong>${progress}%</strong></div>
     <div class="bar"><i style="width:${progress}%"></i></div>
     <button class="notes-button" type="button" data-notes-zone="${escapeHtml(zone.id)}">📝 Notas <span>${zone.notes?.length || 0}</span></button>
     ${zone.permission ? `<div class="permission-note">☀️ Con permiso hoy${zone.permissionReason ? ` · ${escapeHtml(zone.permissionReason)}` : ''}</div>` : ''}
     <ul class="task-list">${zone.tasks.map(task => `<li class="task-row ${task.done ? 'done' : ''}">
-      <span class="task-check-wrap">${isOwn ? `<input type="checkbox" class="task-check" aria-label="Marcar ${escapeHtml(task.text)}" data-toggle-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}" ${task.done ? 'checked' : ''}>` : `<input type="checkbox" class="task-check blocked-check" aria-label="${task.done ? 'Completada' : 'Pendiente'}: ${escapeHtml(task.text)}" ${task.done ? 'checked' : ''} disabled><button type="button" class="task-lock-hit" data-locked-check aria-label="Solo puedes marcar las actividades de tu propio rol"></button>`}</span>
+      <span class="task-check-wrap">${isOwn ? `<input type="checkbox" class="task-check" aria-label="Marcar ${escapeHtml(task.text)}" data-toggle-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}" ${task.done ? 'checked' : ''}>` : `<input type="checkbox" class="task-check blocked-check" aria-label="${task.done ? 'Completada' : 'Pendiente'}: ${escapeHtml(task.text)}" ${task.done ? 'checked' : ''} disabled>${state.isGuest ? '' : '<button type="button" class="task-lock-hit" data-locked-check aria-label="Solo puedes marcar las actividades de tu propio rol"></button>'}`}</span>
       <div class="task-detail"><div class="task-text">${escapeHtml(task.text)}</div>${task.done ? `<div class="task-meta">✓ ${escapeHtml(task.markedBy || '')} · ${escapeHtml(task.markedAt || '')}</div>` : ''}</div>
-      ${!task.done && !zone.permission ? `<button class="mini-button nudge-button" title="Dar un toque a ${escapeHtml(zone.person)}" aria-label="Dar un toque" data-nudge-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}">🔔</button>` : ''}
-      <div class="task-actions"><button class="mini-button edit-button" title="Editar tarea" aria-label="Editar tarea" data-edit-task-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}">✏️</button></div>
+      ${!state.isGuest && !task.done && !zone.permission ? `<button class="mini-button nudge-button" title="Dar un toque a ${escapeHtml(zone.person)}" aria-label="Dar un toque" data-nudge-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}">🔔</button>` : ''}
+      ${state.isGuest ? '' : `<div class="task-actions"><button class="mini-button edit-button" title="Editar tarea" aria-label="Editar tarea" data-edit-task-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}">✏️</button></div>`}
     </li>`).join('')}</ul>
   </article>`;
 }
@@ -96,17 +101,18 @@ function renderHistory() {
   list.innerHTML = state.data.history.map(item => `<article class="history-item ${item.type === 'permiso' ? 'permission-history' : ''}"><div class="history-top"><div><span class="history-person">${escapeHtml(item.person)}</span><div class="history-zone">${escapeHtml(item.zone)}</div></div><time>${escapeHtml(item.date)}</time></div>${item.type === 'permiso' ? `<div class="history-permission">☀️ Ausente con permiso</div><p class="history-reason"><strong>Motivo:</strong> ${escapeHtml(item.reason || 'Sin motivo registrado')}</p>` : `<ul>${(item.tasks || []).map(task => `<li>${escapeHtml(task)}</li>`).join('')}</ul>`}</article>`).join('');
 }
 function renderNotice() {
-  const banner = $('#yesterday-banner'), notice = state.profile && state.data.notices[state.profile.name];
+  const banner = $('#yesterday-banner'), notice = !state.isGuest && state.profile && state.data.notices[state.profile.name];
   if (!notice) { banner.classList.add('hidden'); return; }
   banner.classList.remove('hidden');
   banner.innerHTML = `<div><strong>⚠️ Ayer no hiciste (${escapeHtml(notice.zone)}):</strong> ${notice.tasks.map(escapeHtml).join(' · ')}</div><button id="dismiss-notice" class="mini-button" aria-label="Cerrar aviso">×</button>`;
-  $('#dismiss-notice').onclick = async () => { await api('/api/notice/dismiss', request('POST', { person: state.profile.name })).catch(() => {}); };
+  $('#dismiss-notice').onclick = async () => { await api('/api/notice/dismiss', request('POST', { deviceId, person: state.profile.name })).catch(() => {}); };
 }
 function renderNotes(zoneId) {
   const zone = state.data?.zones.find(item => item.id === zoneId);
   if (!zone) return;
   $('#notes-title').textContent = `Notas · ${zone.name}`;
   $('#notes-about').textContent = `Sobre: ${zone.person || 'Sin responsable'}`;
+  $('#note-composer').classList.toggle('hidden', state.isGuest);
   const notes = zone.notes || [];
   $('#notes-list').innerHTML = notes.length ? notes.map(note => {
     const time = new Intl.DateTimeFormat('es-EC', { timeZone: 'America/Guayaquil', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(note.createdAt));
@@ -128,17 +134,17 @@ function renderZonePicker() {
 
 socket.on('connect', () => {
   $('#sync-status').textContent = '● En vivo'; $('#sync-status').classList.add('connected');
-  if (state.profile) socket.emit('identify', { deviceId });
+  if (state.profile && !state.isGuest) socket.emit('identify', { deviceId });
 });
 socket.on('disconnect', () => { $('#sync-status').textContent = '● Reconectando'; $('#sync-status').classList.remove('connected'); });
 socket.on('state', data => { state.data = data; render(); });
 socket.on('profile', profile => {
-  if (profile.deviceId === deviceId) { state.profile = { name: profile.name, zoneId: profile.zoneId, deviceId }; localStorage.setItem('tareas-profile', JSON.stringify(state.profile)); render(); }
+  if (!state.isGuest && profile.deviceId === deviceId) { state.profile = { name: profile.name, zoneId: profile.zoneId, deviceId }; localStorage.setItem('tareas-profile', JSON.stringify(state.profile)); render(); }
 });
 socket.on('identity-error', payload => say(payload.error));
 socket.on('nudge', payload => {
   const recipients = payload.persons || [payload.person];
-  if (!state.profile || !recipients.some(person => person.toLowerCase() === state.profile.name.toLowerCase())) return;
+  if (state.isGuest || !state.profile || !recipients.some(person => person.toLowerCase() === state.profile.name.toLowerCase())) return;
   const message = `🔔 ${payload.from} te recuerda que falta: ${payload.task}`;
   say(message); if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
   try {
@@ -153,12 +159,21 @@ socket.on('nudge', payload => {
 document.addEventListener('change', async event => {
   const toggle = event.target.closest('[data-toggle-zone]');
   if (!toggle) return;
+  if (state.isGuest) { render(); return; }
   const payload = { zoneId: toggle.dataset.toggleZone, taskId: toggle.dataset.task, done: toggle.checked };
   socket.timeout(5000).emit('toggle-task', payload, (timeoutError, result) => {
     if (timeoutError || result?.error) { toggle.checked = !payload.done; say(result?.error || 'Se perdió la conexión. Intenta otra vez.'); }
   });
 });
 document.addEventListener('click', async event => {
+  if (event.target.closest('#guest-btn, #profile-guest-btn')) {
+    state.isGuest = true;
+    socket.emit('forget-profile');
+    closeDialog($('#profile-dialog'));
+    render();
+    say('Modo invitado: solo puedes mirar.');
+    return;
+  }
   const quickName = event.target.closest('[data-name]');
   if (quickName) $('#person-input').value = quickName.dataset.name;
   const zoneChoice = event.target.closest('[data-pick-zone]');
@@ -170,6 +185,7 @@ document.addEventListener('click', async event => {
   if (lockedCheck) say('Solo puedes marcar las actividades de tu propio rol', 1600);
   const permission = event.target.closest('[data-permission]');
   if (permission) {
+    if (state.isGuest) { render(); return; }
     const zoneId = permission.dataset.permission;
     if (permission.checked) {
       permission.checked = false;
@@ -179,29 +195,36 @@ document.addEventListener('click', async event => {
       $('#permission-reason').value = ''; $('#permission-error').classList.add('hidden');
       $('#permission-dialog').showModal();
     } else {
-      try { await api('/api/permission', request('POST', { zoneId, enabled: false })); }
+      try { await api('/api/permission', request('POST', { zoneId, enabled: false, deviceId })); }
       catch (error) { say(error.message); render(); }
     }
   }
   const nudge = event.target.closest('[data-nudge-zone]');
   if (nudge) {
+    if (state.isGuest || !state.profile) return say('Solo los perfiles vinculados pueden dar un toque.');
     nudge.classList.remove('ringing'); void nudge.offsetWidth; nudge.classList.add('ringing');
     socket.emit('nudge', { zoneId: nudge.dataset.nudgeZone, taskId: nudge.dataset.task, from: state.profile?.name || 'Alguien' });
     say(`Toque enviado a ${state.data.zones.find(zone => zone.id === nudge.dataset.nudgeZone)?.person}.`);
   }
   const edit = event.target.closest('[data-edit-task-zone]');
   if (edit) {
+    if (state.isGuest) return;
     state.editTask = { zoneId: edit.dataset.editTaskZone, taskId: edit.dataset.task };
     const task = state.data.zones.find(zone => zone.id === state.editTask.zoneId).tasks.find(item => item.id === state.editTask.taskId);
     $('#task-dialog-title').textContent = 'Editar tarea'; $('#task-zone').value = state.editTask.zoneId; $('#task-zone').disabled = true; $('#task-text').value = task.text; $('#task-password').value = ''; $('#task-password').required = true; $('#task-password-field').classList.remove('hidden'); $('#task-error').classList.add('hidden'); $('#task-dialog').showModal();
   }
   if (event.target.closest('#add-task-btn')) {
+    if (state.isGuest) return;
     state.editTask = null; $('#task-dialog-title').textContent = 'Añadir una tarea'; $('#task-form').reset(); $('#task-zone').disabled = false; $('#task-password').required = false; $('#task-password-field').classList.add('hidden'); $('#task-error').classList.add('hidden'); renderZonePicker(); $('#task-dialog').showModal();
   }
   if (event.target.closest('#role-change-btn')) {
+    if (state.isGuest) return;
     $('#role-password').value = ''; $('#role-password-error').classList.add('hidden'); $('#role-password-dialog').showModal();
   }
-  if (event.target.closest('#unlink-btn')) $('#unlink-dialog').showModal();
+  if (event.target.closest('#unlink-btn')) {
+    if (state.isGuest) return;
+    $('#unlink-password').value = ''; $('#unlink-error').classList.add('hidden'); $('#unlink-dialog').showModal();
+  }
   const notes = event.target.closest('[data-notes-zone]');
   if (notes) {
     state.notesZoneId = notes.dataset.notesZone; $('#note-form').reset(); $('#note-error').classList.add('hidden');
@@ -240,37 +263,41 @@ $('#role-form').addEventListener('submit', async event => {
 });
 $('#unlink-form').addEventListener('submit', async event => {
   event.preventDefault();
+  if ($('#unlink-password').value !== EDIT_PASSWORD) { $('#unlink-error').textContent = 'Contraseña incorrecta.'; $('#unlink-error').classList.remove('hidden'); return; }
   const previousZoneId = state.profile?.zoneId;
   try {
-    const result = await api('/api/profile/unlink', request('POST', { deviceId }));
+    const result = await api('/api/profile/unlink', request('POST', { deviceId, password: $('#unlink-password').value }));
     state.data = result.state; state.profile = null;
     localStorage.removeItem('tareas-profile'); socket.emit('forget-profile');
     state.selectedZone = previousZoneId || state.data.zones[0]?.id || null;
-    closeDialog($('#unlink-dialog')); render();
+    $('#unlink-password').value = ''; closeDialog($('#unlink-dialog')); render();
     setTimeout(() => { renderZonePicker(); $('#profile-error').classList.add('hidden'); $('#profile-dialog').showModal(); }, 280);
   } catch (error) { say(error.message); }
 });
 $('#task-form').addEventListener('submit', async event => {
   event.preventDefault();
+  if (state.isGuest || !state.profile) return say('Vincula un perfil para modificar tareas.');
   if (state.editTask && $('#task-password').value !== EDIT_PASSWORD) { $('#task-error').textContent = 'Contraseña incorrecta.'; $('#task-error').classList.remove('hidden'); return; }
   const zoneId = $('#task-zone').value, text = $('#task-text').value.trim();
   try {
-    if (state.editTask) await api(`/api/task/${encodeURIComponent(state.editTask.zoneId)}/${encodeURIComponent(state.editTask.taskId)}`, request('PATCH', { text, password: $('#task-password').value }));
-    else await api('/api/task', request('POST', { zoneId, text }));
+    if (state.editTask) await api(`/api/task/${encodeURIComponent(state.editTask.zoneId)}/${encodeURIComponent(state.editTask.taskId)}`, request('PATCH', { text, password: $('#task-password').value, deviceId }));
+    else await api('/api/task', request('POST', { zoneId, text, deviceId }));
     $('#task-password').value = ''; closeDialog($('#task-dialog'));
   } catch (error) { $('#task-error').textContent = error.message; $('#task-error').classList.remove('hidden'); }
 });
 $('#permission-form').addEventListener('submit', async event => {
   event.preventDefault();
+  if (state.isGuest || !state.profile) return say('Vincula un perfil para activar un permiso.');
   const reason = $('#permission-reason').value.trim();
   if (!reason) { $('#permission-error').textContent = 'Escribe un motivo antes de confirmar.'; $('#permission-error').classList.remove('hidden'); return; }
   try {
-    await api('/api/permission', request('POST', { zoneId: state.pendingAbsenceZone, enabled: true, reason }));
+    await api('/api/permission', request('POST', { zoneId: state.pendingAbsenceZone, enabled: true, reason, deviceId }));
     state.pendingAbsenceZone = null; closeDialog($('#permission-dialog'));
   } catch (error) { $('#permission-error').textContent = error.message; $('#permission-error').classList.remove('hidden'); }
 });
 $('#note-form').addEventListener('submit', async event => {
   event.preventDefault();
+  if (state.isGuest || !state.profile) return;
   const text = $('#note-text').value.trim();
   try {
     const result = await api(`/api/zone/${encodeURIComponent(state.notesZoneId)}/notes`, request('POST', { deviceId, text }));
@@ -286,6 +313,7 @@ for (const dialog of document.querySelectorAll('dialog')) {
 $('#permission-dialog').addEventListener('close', () => { state.pendingAbsenceZone = null; });
 $('#notes-dialog').addEventListener('close', () => { state.notesZoneId = null; });
 $('#notify-btn').addEventListener('click', async () => {
+  if (state.isGuest) return;
   if (!('Notification' in window)) return say('Este navegador no admite notificaciones.');
   const permission = await Notification.requestPermission();
   if (permission === 'granted') { $('#notify-btn').classList.add('enabled'); say('Notificaciones activadas en este teléfono.'); }
@@ -299,7 +327,7 @@ document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('cl
   next.classList.remove('view-enter'); void next.offsetWidth; next.classList.add('view-enter');
 }));
 function runReminderCheck() {
-  if (!state.profile || !('Notification' in window) || Notification.permission !== 'granted' || !state.data) return;
+  if (state.isGuest || !state.profile || !('Notification' in window) || Notification.permission !== 'granted' || !state.data) return;
   const zone = state.data.zones.find(item => item.id === state.profile.zoneId);
   if (!zone || zone.permission || !zone.tasks.some(task => !task.done)) return;
   const now = new Date(), hour = now.getHours(), minute = now.getMinutes();

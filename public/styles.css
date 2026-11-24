@@ -64,3 +64,7 @@ textarea:focus{border-color:#8179e8;box-shadow:0 0 0 3px #655de414}
 .task-check.blocked-check{opacity:.92;pointer-events:none}
 .task-lock-hit{background:transparent;color:transparent;box-shadow:none}
 .task-lock-hit:hover{background:transparent;transform:none}
+.guest-btn{height:38px;border:1px solid #ffffff45;background:#ffffff1c;border-radius:13px;padding:0 11px;color:#fff;font:700 10px 'DM Sans';cursor:pointer;white-space:nowrap;transition:background .18s,transform .18s var(--ease)}.guest-btn:hover{background:#ffffff35;transform:translateY(-1px)}.guest-status{border:1px solid #ffffff45;background:#ffffff1c;border-radius:13px;padding:9px 11px;color:#fff;font-size:10px;font-weight:800;white-space:nowrap}.guest-profile-button{width:100%;margin-top:10px}.guest-mode .task-check:disabled{cursor:default;opacity:.95}.guest-mode .task-row{cursor:default}
+@media(max-width:700px){.guest-btn{width:36px;padding:0;display:grid;place-items:center;font-size:16px}.guest-btn b{display:none}.guest-status{font-size:8px;padding:8px 6px}.top-actions{gap:5px}}
+@media(max-width:385px){.guest-btn{width:32px;height:34px}.guest-status{padding:7px 5px;font-size:7px}}
+@media(prefers-color-scheme:dark){.guest-profile-button{color:#d9d8e8}}

@@ -215,6 +215,7 @@ app.post('/api/profile/change', (req, res) => {
   res.json({ profile: { name, zoneId: zone.id, deviceId }, state: publicState() });
 });
 app.post('/api/profile/unlink', (req, res) => {
+  if (!requirePassword(req, res)) return;
   const deviceId = String(req.body?.deviceId || '').trim().slice(0, 100);
   const profile = profileForDevice(deviceId);
   if (!profile) return res.status(404).json({ error: 'Este dispositivo no tiene un perfil vinculado.' });
@@ -226,6 +227,8 @@ app.post('/api/profile/unlink', (req, res) => {
 app.post('/api/permission', (req, res) => {
   const zone = zoneById(req.body?.zoneId);
   if (!zone) return res.status(404).json({ error: 'Zona no encontrada.' });
+  const profile = profileForDevice(req.body?.deviceId);
+  if (!profile || profile.zoneId !== zone.id) return res.status(403).json({ error: 'Solo la persona responsable puede cambiar el permiso de su rol.' });
   const enabled = Boolean(req.body.enabled);
   const reason = String(req.body?.reason || '').trim().slice(0, 180);
   if (enabled && !reason) return res.status(400).json({ error: 'Escribe un motivo antes de activar el permiso.' });
@@ -235,6 +238,8 @@ app.post('/api/permission', (req, res) => {
 });
 app.post('/api/notice/dismiss', (req, res) => {
   const person = String(req.body?.person || '').trim();
+  const profile = profileForDevice(req.body?.deviceId);
+  if (!profile || profile.name.toLocaleLowerCase() !== person.toLocaleLowerCase()) return res.status(403).json({ error: 'No puedes modificar avisos de otro perfil.' });
   if (person) delete state.notices[person];
   sendState(); res.json(publicState());
 });
@@ -263,6 +268,7 @@ app.post('/api/task/toggle', (req, res) => {
   sendState(); res.json(publicState());
 });
 app.post('/api/task', (req, res) => {
+  if (!profileForDevice(req.body?.deviceId)) return res.status(403).json({ error: 'Vincula un perfil antes de modificar tareas.' });
   const zone = zoneById(req.body?.zoneId);
   const text = String(req.body?.text || '').trim().slice(0, 120);
   if (!zone || !text) return res.status(400).json({ error: 'Zona y descripción son obligatorias.' });
@@ -271,6 +277,7 @@ app.post('/api/task', (req, res) => {
 });
 app.patch('/api/task/:zoneId/:taskId', (req, res) => {
   if (!requirePassword(req, res)) return;
+  if (!profileForDevice(req.body?.deviceId)) return res.status(403).json({ error: 'Vincula un perfil antes de modificar tareas.' });
   const zone = zoneById(req.params.zoneId);
   const task = zone?.tasks.find(t => t.id === req.params.taskId);
   const text = String(req.body?.text || '').trim().slice(0, 120);
@@ -370,8 +377,9 @@ async function start() {
     socket.on('nudge', payload => {
       const zone = zoneById(payload?.zoneId);
       const task = zone?.tasks.find(t => t.id === payload?.taskId);
-      if (!task || task.done || zone.permission) return;
-      io.emit('nudge', { person: zone.person, persons: zone.responsables || [zone.person], zone: zone.name, task: task.text, from: String(payload.from || 'Alguien').slice(0, 40) });
+      const sender = profileForDevice(socket.data.deviceId);
+      if (!sender || !task || task.done || zone.permission) return;
+      io.emit('nudge', { person: zone.person, persons: zone.responsables || [zone.person], zone: zone.name, task: task.text, from: sender.name });
     });
   });
   drawRolesIfDue();
