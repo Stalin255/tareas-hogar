@@ -40,7 +40,7 @@ function initialState() {
   ].map(([name, person, color, tasks]) => {
     const id = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     return {
-    id, name, person, color, permission: false, permissionReason: '', notes: [],
+    id, name, person, color, permission: false, permisoMotivo: '', permissionReason: '', notes: [],
     ...(name === 'BAÑO' ? { responsables: ['Libro', 'Angel'], personasPermitidas: ['Libro', 'Angel'] } : {}),
     tasks: tasks.map((text, i) => ({ id: `${id}-${i + 1}`, text, done: false, markedBy: null, markedAt: null }))
   }; });
@@ -90,7 +90,11 @@ function normalizeState(saved) {
       bathroom.personasPermitidas ||= ['Libro', 'Angel'];
       bathroom.person ||= 'Libro y Angel';
     }
-    for (const zone of normalized.zones) { zone.permissionReason ||= ''; zone.notes ||= []; }
+    for (const zone of normalized.zones) {
+      zone.permisoMotivo = String(zone.permisoMotivo || zone.permissionReason || '');
+      zone.permissionReason = zone.permisoMotivo;
+      zone.notes ||= [];
+    }
     if (!normalized.cicloInicio) normalized.cicloInicio = ecuadorDateTime(new Date());
     if (!normalized.perfilesBloqueados || Array.isArray(normalized.perfilesBloqueados)) normalized.perfilesBloqueados = {};
     if (!Object.hasOwn(normalized, 'ultimoSorteo')) normalized.ultimoSorteo = null;
@@ -237,6 +241,16 @@ async function sendPushToProfile(profileId, { title, body, url = '/' } = {}) {
   if (removedExpired) await persist();
   return delivered;
 }
+async function sendPushToOtherProfiles(excludedProfileName, payload) {
+  if (!PUSH_ENABLED) return 0;
+  const excluded = pushProfileId(excludedProfileName);
+  let delivered = 0;
+  for (const profileId of Object.keys(state.pushSubscriptions || {})) {
+    if (profileId === excluded) continue;
+    delivered += await sendPushToProfile(profileId, payload);
+  }
+  return delivered;
+}
 function isValidCronSecret(req, allowQuery = false) {
   if (!CRON_SECRET) return false;
   const authorization = String(req.get('authorization') || '');
@@ -244,6 +258,38 @@ function isValidCronSecret(req, allowQuery = false) {
   const expectedBuffer = Buffer.from(CRON_SECRET);
   const actualBuffer = Buffer.from(candidate);
   return expectedBuffer.length === actualBuffer.length && crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+}
+
+async function sendWhatsAppMessage(message) {
+  if (!WHATSAPP_CONFIGURED) return { sent: false, reason: 'WhatsApp no configurado' };
+  const baseUrl = GREEN_API_URL.replace(/\/+$/, '');
+  try {
+    const response = await fetch(`${baseUrl}/waInstance${GREEN_API_ID_INSTANCE}/sendMessage/${GREEN_API_TOKEN}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chatId: WHATSAPP_GROUP_ID, message })
+    });
+    if (!response.ok) return { sent: false, reason: `Green-API respondió HTTP ${response.status}` };
+    const result = await response.json().catch(() => ({}));
+    return { sent: true, messageId: result.idMessage || null };
+  } catch (error) {
+    console.warn('No se pudo enviar el mensaje de WhatsApp:', error.message);
+    return { sent: false, reason: 'No se pudo conectar con Green-API' };
+  }
+}
+function notifyNote(profile, zone, text) {
+  const message = `📝 *Nueva nota en Tareas del Hogar*\n\n👤 *${profile.name}* (${zone.name}) escribió:\n_"${text}"_`;
+  void Promise.allSettled([
+    sendWhatsAppMessage(message),
+    sendPushToOtherProfiles(profile.name, { title: `📝 Nota de ${profile.name} (${zone.name})`, body: text, url: '/' })
+  ]).then(results => results.forEach(result => { if (result.status === 'rejected') console.warn('Falló un aviso de nueva nota:', result.reason?.message || result.reason); }));
+}
+function notifyAbsence(profile, zone, reason) {
+  const message = `🚫 *Aviso de ausencia en Tareas del Hogar*\n\n👤 *${profile.name}* (${zone.name}) activó permiso hoy.\n📌 *Motivo:* ${reason}`;
+  void Promise.allSettled([
+    sendWhatsAppMessage(message),
+    sendPushToOtherProfiles(profile.name, { title: `🚫 Ausencia de ${profile.name} (${zone.name})`, body: reason, url: '/' })
+  ]).then(results => results.forEach(result => { if (result.status === 'rejected') console.warn('Falló un aviso de ausencia:', result.reason?.message || result.reason); }));
 }
 
 async function sendWhatsAppPendingReminder() {
@@ -280,20 +326,7 @@ async function sendWhatsAppPendingReminder() {
     }
   }
   const message = lines.join('\n').trim();
-  const baseUrl = GREEN_API_URL.replace(/\/+$/, '');
-  try {
-    const response = await fetch(`${baseUrl}/waInstance${GREEN_API_ID_INSTANCE}/sendMessage/${GREEN_API_TOKEN}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chatId: WHATSAPP_GROUP_ID, message })
-    });
-    if (!response.ok) return { sent: false, reason: `Green-API respondió HTTP ${response.status}` };
-    const result = await response.json().catch(() => ({}));
-    return { sent: true, messageId: result.idMessage || null };
-  } catch (error) {
-    console.warn('No se pudo enviar el recordatorio de WhatsApp:', error.message);
-    return { sent: false, reason: 'No se pudo conectar con Green-API' };
-  }
+  return sendWhatsAppMessage(message);
 }
 
 app.get('/api/whatsapp/groups', async (req, res) => {
@@ -465,9 +498,13 @@ app.post('/api/permission', (req, res) => {
   const enabled = Boolean(req.body.enabled);
   const reason = String(req.body?.reason || '').trim().slice(0, 180);
   if (enabled && !reason) return res.status(400).json({ error: 'Escribe un motivo antes de activar el permiso.' });
+  const wasEnabled = Boolean(zone.permission);
   zone.permission = enabled;
-  zone.permissionReason = enabled ? reason : '';
-  sendState(); res.json(publicState());
+  zone.permisoMotivo = enabled ? reason : '';
+  zone.permissionReason = zone.permisoMotivo;
+  sendState();
+  if (enabled && !wasEnabled) notifyAbsence(profile, zone, reason);
+  res.json(publicState());
 });
 app.post('/api/notice/dismiss', (req, res) => {
   const person = String(req.body?.person || '').trim();
@@ -483,10 +520,13 @@ app.post('/api/zone/:zoneId/notes', (req, res) => {
   if (!zone) return res.status(404).json({ error: 'Zona no encontrada.' });
   if (!profile) return res.status(403).json({ error: 'Vincula un perfil antes de escribir una nota.' });
   if (!text) return res.status(400).json({ error: 'Escribe una nota antes de guardarla.' });
+  const previous = zone.notes[0];
+  if (previous?.text === text) return res.json({ note: previous, unchanged: true, state: publicState() });
   const note = { id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, author: profile.name, about: zone.person || 'Sin responsable', text, createdAt: ecuadorDateTime(new Date()) };
   zone.notes.unshift(note);
   zone.notes = zone.notes.slice(0, 200);
   sendState();
+  notifyNote(profile, zone, text);
   res.json({ note, state: publicState() });
 });
 app.post('/api/task/toggle', (req, res) => {
@@ -548,7 +588,8 @@ function rollover() {
     const personLabel = zone.person || 'Sin responsable';
     const dailyNotes = Array.isArray(zone.notes) ? zone.notes.map(note => ({ ...note })) : [];
     if (zone.permission) {
-      if (zone.permissionReason || dailyNotes.length) state.history.unshift({ date: yesterday, person: personLabel, zone: zone.name, type: 'permiso', reason: zone.permissionReason, tasks: [], notes: dailyNotes });
+      const reason = zone.permisoMotivo || zone.permissionReason || '';
+      if (reason || dailyNotes.length) state.history.unshift({ date: yesterday, person: personLabel, zone: zone.name, type: 'permiso', reason, permisoMotivo: reason, tasks: [], notes: dailyNotes });
     } else {
       const unfinished = zone.tasks.filter(t => !t.done).map(t => t.text);
       const complete = unfinished.length === 0;
@@ -559,6 +600,7 @@ function rollover() {
       } else if (dailyNotes.length) state.history.unshift({ date: yesterday, person: personLabel, zone: zone.name, tasks: [], notes: dailyNotes });
     }
     zone.permission = false;
+    zone.permisoMotivo = '';
     zone.permissionReason = '';
     zone.notes = [];
     for (const task of zone.tasks) { task.done = false; task.markedBy = null; task.markedAt = null; }

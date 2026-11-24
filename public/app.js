@@ -139,7 +139,7 @@ function renderZone(zone) {
     <div class="zone-progress"><span>${zone.permission ? 'Con permiso hoy' : pending ? `Faltan ${pending} de ${zone.tasks.length}` : '¡Todo listo!'}</span><strong>${progress}%</strong></div>
     <div class="bar"><i style="width:${progress}%"></i></div>
     <button class="notes-button" type="button" data-notes-zone="${escapeHtml(zone.id)}">📝 Notas <span>${zone.notes?.length || 0}</span></button>
-    ${zone.permission ? `<div class="permission-note">☀️ Con permiso hoy${zone.permissionReason ? ` · ${escapeHtml(zone.permissionReason)}` : ''}</div>` : ''}
+    ${zone.permission ? `<div class="permission-note">🚫 Ausente: ${escapeHtml(zone.permisoMotivo || zone.permissionReason || 'Con permiso hoy')}</div>` : ''}
     <ul class="task-list">${zone.tasks.map(task => `<li class="task-row ${task.done ? 'done' : ''}">
       <span class="task-check-wrap">${isOwn ? `<input type="checkbox" class="task-check" aria-label="Marcar ${escapeHtml(task.text)}" data-toggle-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}" ${task.done ? 'checked' : ''}>` : `<input type="checkbox" class="task-check blocked-check" aria-label="${task.done ? 'Completada' : 'Pendiente'}: ${escapeHtml(task.text)}" ${task.done ? 'checked' : ''} disabled>${state.isGuest ? '' : '<button type="button" class="task-lock-hit" data-locked-check aria-label="Solo puedes marcar las actividades de tu propio rol"></button>'}`}</span>
       <div class="task-detail"><div class="task-text">${escapeHtml(task.text)}</div>${task.done ? `<div class="task-meta">✓ ${escapeHtml(task.markedBy || '')} · ${escapeHtml(task.markedAt || '')}</div>` : ''}</div>
@@ -155,7 +155,7 @@ function renderHistory() {
       const time = note.createdAt ? new Intl.DateTimeFormat('es-EC', { timeZone: 'America/Guayaquil', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(note.createdAt)) : '';
       return `<div class="history-note"><div><strong>${escapeHtml(note.author || 'Familia')}</strong><time>${escapeHtml(time)}</time></div><p>${escapeHtml(note.text || '').replace(/\n/g, '<br>')}</p></div>`;
     }).join('');
-    return `<article class="history-item ${item.type === 'permiso' ? 'permission-history' : ''}"><div class="history-top"><div><span class="history-person">${escapeHtml(item.person)}</span><div class="history-zone">${escapeHtml(item.zone)}</div></div><time>${escapeHtml(item.date)}</time></div>${item.type === 'permiso' ? `<div class="history-permission">☀️ Ausente con permiso</div><p class="history-reason"><strong>Motivo:</strong> ${escapeHtml(item.reason || 'Sin motivo registrado')}</p>` : (item.tasks || []).length ? `<ul>${item.tasks.map(task => `<li>${escapeHtml(task)}</li>`).join('')}</ul>` : ''}${notes ? `<div class="history-notes"><strong>📝 Notas de ese día</strong>${notes}</div>` : ''}</article>`;
+    return `<article class="history-item ${item.type === 'permiso' ? 'permission-history' : ''}"><div class="history-top"><div><span class="history-person">${escapeHtml(item.person)}</span><div class="history-zone">${escapeHtml(item.zone)}</div></div><time>${escapeHtml(item.date)}</time></div>${item.type === 'permiso' ? `<div class="history-permission">🚫 Ausente con permiso</div><p class="history-reason"><strong>Motivo:</strong> ${escapeHtml(item.permisoMotivo || item.reason || 'Sin motivo registrado')}</p>` : (item.tasks || []).length ? `<ul>${item.tasks.map(task => `<li>${escapeHtml(task)}</li>`).join('')}</ul>` : ''}${notes ? `<div class="history-notes"><strong>📝 Notas de ese día</strong>${notes}</div>` : ''}</article>`;
   }).join('');
 }
 function formatDate(date) {
@@ -360,8 +360,8 @@ document.addEventListener('click', async event => {
   if (lockedCheck) say('Solo puedes marcar las actividades de tu propio rol', 1600);
   const permission = event.target.closest('[data-permission]');
   if (permission) {
-    if (state.isGuest) { render(); return; }
     const zoneId = permission.dataset.permission;
+    if (state.isGuest || !state.profile || state.profile.zoneId !== zoneId) { render(); say('Solo puedes cambiar el permiso de tu propio rol.', 1600); return; }
     if (permission.checked) {
       permission.checked = false;
       state.pendingAbsenceZone = zoneId;
@@ -484,6 +484,7 @@ $('#permission-form').addEventListener('submit', async event => {
   if (state.isGuest || !state.profile) return say('Vincula un perfil para activar un permiso.');
   const reason = $('#permission-reason').value.trim();
   if (!reason) { $('#permission-error').textContent = 'Escribe un motivo antes de confirmar.'; $('#permission-error').classList.remove('hidden'); return; }
+  if (!state.pendingAbsenceZone || state.profile.zoneId !== state.pendingAbsenceZone) { $('#permission-error').textContent = 'Solo puedes activar permiso en tu propio rol.'; $('#permission-error').classList.remove('hidden'); return; }
   try {
     await api('/api/permission', request('POST', { zoneId: state.pendingAbsenceZone, enabled: true, reason, deviceId }));
     state.pendingAbsenceZone = null; closeDialog($('#permission-dialog'));
