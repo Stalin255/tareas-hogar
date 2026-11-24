@@ -17,6 +17,12 @@ const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || '';
 const CRON_SECRET = process.env.CRON_SECRET || '';
+const GREEN_API_URL = process.env.GREEN_API_URL || '';
+const GREEN_API_ID_INSTANCE = process.env.GREEN_API_ID_INSTANCE || '';
+const GREEN_API_TOKEN = process.env.GREEN_API_TOKEN || '';
+const WHATSAPP_GROUP_ID = process.env.WHATSAPP_GROUP_ID || '';
+const GREEN_API_CONFIGURED = Boolean(GREEN_API_URL && GREEN_API_ID_INSTANCE && GREEN_API_TOKEN);
+const WHATSAPP_CONFIGURED = Boolean(GREEN_API_CONFIGURED && WHATSAPP_GROUP_ID);
 const PUSH_ENABLED = Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY && VAPID_SUBJECT);
 if (PUSH_ENABLED) webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 const redis = process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
@@ -231,14 +237,88 @@ async function sendPushToProfile(profileId, { title, body, url = '/' } = {}) {
   if (removedExpired) await persist();
   return delivered;
 }
-function isValidCronSecret(req) {
+function isValidCronSecret(req, allowQuery = false) {
   if (!CRON_SECRET) return false;
   const authorization = String(req.get('authorization') || '');
-  const candidate = String(req.get('x-cron-secret') || (authorization.toLowerCase().startsWith('bearer ') ? authorization.slice(7) : ''));
+  const candidate = String(req.get('x-cron-secret') || (authorization.toLowerCase().startsWith('bearer ') ? authorization.slice(7) : '') || (allowQuery ? req.query?.secret : '') || '');
   const expectedBuffer = Buffer.from(CRON_SECRET);
   const actualBuffer = Buffer.from(candidate);
   return expectedBuffer.length === actualBuffer.length && crypto.timingSafeEqual(expectedBuffer, actualBuffer);
 }
+
+async function sendWhatsAppPendingReminder() {
+  const pendingByPerson = new Map();
+  for (const zone of state.zones) {
+    if (zone.permission) continue;
+    const tasks = zone.tasks.filter(task => !task.done).map(task => task.text);
+    if (!tasks.length) continue;
+    const people = zone.responsables || (zone.person ? [zone.person] : []);
+    for (const person of people) {
+      const key = pushProfileId(person);
+      if (!key) continue;
+      let assignment = pendingByPerson.get(key);
+      if (!assignment) {
+        assignment = { name: person, zones: new Map() };
+        pendingByPerson.set(key, assignment);
+      }
+      const zoneTasks = assignment.zones.get(zone.name) || [];
+      zoneTasks.push(...tasks);
+      assignment.zones.set(zone.name, zoneTasks);
+    }
+  }
+
+  if (!pendingByPerson.size) return { sent: false, reason: 'Todo completado' };
+  if (!WHATSAPP_CONFIGURED) return { sent: false, reason: 'WhatsApp no configurado' };
+
+  const lines = ['📋 *Recordatorio de Tareas del Hogar*', ''];
+  for (const assignment of pendingByPerson.values()) {
+    for (const [zoneName, tasks] of assignment.zones) {
+      const uniqueTasks = [...new Set(tasks)];
+      const noun = uniqueTasks.length === 1 ? 'pendiente' : 'pendientes';
+      lines.push(`👤 *${assignment.name}* (${zoneName}) tiene ${uniqueTasks.length} ${noun}:`);
+      lines.push(...uniqueTasks.map(task => `• ${task}`), '');
+    }
+  }
+  const message = lines.join('\n').trim();
+  const baseUrl = GREEN_API_URL.replace(/\/+$/, '');
+  try {
+    const response = await fetch(`${baseUrl}/waInstance${GREEN_API_ID_INSTANCE}/sendMessage/${GREEN_API_TOKEN}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chatId: WHATSAPP_GROUP_ID, message })
+    });
+    if (!response.ok) return { sent: false, reason: `Green-API respondió HTTP ${response.status}` };
+    const result = await response.json().catch(() => ({}));
+    return { sent: true, messageId: result.idMessage || null };
+  } catch (error) {
+    console.warn('No se pudo enviar el recordatorio de WhatsApp:', error.message);
+    return { sent: false, reason: 'No se pudo conectar con Green-API' };
+  }
+}
+
+app.get('/api/whatsapp/groups', async (req, res) => {
+  if (!isValidCronSecret(req, true)) return res.status(401).json({ error: 'Se requiere un x-cron-secret válido.' });
+  if (!GREEN_API_CONFIGURED) return res.status(503).json({ error: 'Configura GREEN_API_URL, GREEN_API_ID_INSTANCE y GREEN_API_TOKEN.' });
+  const baseUrl = GREEN_API_URL.replace(/\/+$/, '');
+  try {
+    const response = await fetch(`${baseUrl}/waInstance${GREEN_API_ID_INSTANCE}/getChats/${GREEN_API_TOKEN}`);
+    if (!response.ok) return res.status(502).json({ error: `Green-API respondió HTTP ${response.status}.` });
+    const chats = await response.json();
+    const groups = Array.isArray(chats)
+      ? chats.filter(chat => typeof chat?.id === 'string' && chat.id.endsWith('@g.us')).map(chat => ({ id: chat.id, name: chat.name || chat.subject || '' }))
+      : [];
+    res.json(groups);
+  } catch {
+    res.status(502).json({ error: 'No se pudo consultar la lista de chats de Green-API.' });
+  }
+});
+
+app.post('/api/whatsapp/remind-pending', async (req, res) => {
+  if (!CRON_SECRET) return res.status(503).json({ error: 'CRON_SECRET no está configurado.' });
+  if (!isValidCronSecret(req)) return res.status(401).json({ error: 'Secreto de cron no válido.' });
+  rollover();
+  res.json(await sendWhatsAppPendingReminder());
+});
 
 app.get('/api/vapid-public-key', (_req, res) => {
   if (!PUSH_ENABLED) return res.status(503).json({ error: 'Las notificaciones push aún no están configuradas en el servidor.' });
@@ -263,7 +343,6 @@ app.post('/api/push/subscribe', async (req, res) => {
 app.post('/api/push/remind-pending', async (req, res) => {
   if (!CRON_SECRET) return res.status(503).json({ error: 'CRON_SECRET no está configurado.' });
   if (!isValidCronSecret(req)) return res.status(401).json({ error: 'Secreto de cron no válido.' });
-  if (!PUSH_ENABLED) return res.status(503).json({ error: 'Las notificaciones push aún no están configuradas en el servidor.' });
   rollover();
   const pending = new Map();
   for (const zone of state.zones) {
@@ -288,7 +367,13 @@ app.post('/api/push/remind-pending', async (req, res) => {
       url: '/'
     });
   }
-  res.json({ ok: true, date: dateInZone(new Date()), profiles: pending.size, notificationsSent: sent });
+  const whatsapp = await sendWhatsAppPendingReminder();
+  res.json({
+    ok: true,
+    date: dateInZone(new Date()),
+    webPush: { enabled: PUSH_ENABLED, profiles: pending.size, notificationsSent: sent },
+    whatsapp
+  });
 });
 
 app.post('/api/profile/claim', (req, res) => {
