@@ -31,6 +31,42 @@ async function api(url, options = {}) {
   return result;
 }
 function request(method, body) { return { method, body: JSON.stringify(body) }; }
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from(raw, character => character.charCodeAt(0));
+}
+async function updatePushButton() {
+  const button = $('#notify-btn');
+  if (!button) return;
+  button.classList.toggle('hidden', state.isGuest || !state.profile);
+  if (state.isGuest || !state.profile) return;
+  const label = $('#notify-label'), status = $('#notify-status');
+  button.classList.remove('enabled', 'blocked');
+  if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+    label.textContent = 'No disponible'; status.textContent = 'No compatible'; button.disabled = true; button.title = 'Este navegador no admite notificaciones push.'; button.setAttribute('aria-label', 'Notificaciones no compatibles'); return;
+  }
+  button.disabled = false;
+  if (Notification.permission === 'denied') {
+    label.textContent = 'Avisos'; status.textContent = 'Bloqueadas'; button.classList.add('blocked');
+    button.title = 'Notificaciones bloqueadas. Habilítalas en los ajustes del navegador.'; button.setAttribute('aria-label', 'Notificaciones bloqueadas'); return;
+  }
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    const subscription = registration && await registration.pushManager.getSubscription();
+    if (subscription) {
+      label.textContent = 'Avisos'; status.textContent = 'Activas'; button.classList.add('enabled'); button.title = 'Notificaciones push activas en este teléfono.';
+    } else if (Notification.permission === 'granted') {
+      label.textContent = 'Activar avisos'; status.textContent = 'Permiso concedido'; button.title = 'Toca para completar la activación de notificaciones push.';
+    } else {
+      label.textContent = 'Activar avisos'; status.textContent = 'Inactivas'; button.title = 'Activar notificaciones en este teléfono.';
+    }
+  } catch {
+    label.textContent = 'Activar avisos'; status.textContent = 'Inactivas'; button.title = 'Activar notificaciones en este teléfono.';
+  }
+  button.setAttribute('aria-label', `${label.textContent}: ${status.textContent}`);
+}
 function say(message, duration = 3600) {
   const element = $('#toast'); element.textContent = message; element.classList.remove('toast-enter');
   void element.offsetWidth; element.classList.add('show', 'toast-enter');
@@ -68,12 +104,13 @@ function render() {
   $('#unlink-btn').classList.toggle('hidden', !mine);
   $('#guest-btn').classList.toggle('hidden', state.isGuest);
   $('#guest-status').classList.toggle('hidden', !state.isGuest);
-  $('#notify-btn').classList.toggle('hidden', state.isGuest);
+  $('#notify-btn').classList.toggle('hidden', state.isGuest || !mine);
   $('#add-task-btn').classList.toggle('hidden', state.isGuest);
   $('#devices-btn').classList.toggle('hidden', state.isGuest || !mine);
   $('#manage-tasks-btn').classList.toggle('hidden', state.isGuest || !mine);
   $('#add-reminder-btn').classList.toggle('hidden', state.isGuest || !mine);
   document.body.classList.toggle('guest-mode', state.isGuest);
+  updatePushButton();
 
   const total = data.zones.reduce((sum, zone) => sum + zone.tasks.length, 0);
   const done = data.zones.reduce((sum, zone) => sum + zone.tasks.filter(task => task.done).length, 0);
@@ -113,7 +150,13 @@ function renderZone(zone) {
 function renderHistory() {
   const list = $('#history-list');
   if (!state.data.history.length) { list.innerHTML = '<div class="empty-history">✨ Aún no hay tareas pendientes en el historial.</div>'; return; }
-  list.innerHTML = state.data.history.map(item => `<article class="history-item ${item.type === 'permiso' ? 'permission-history' : ''}"><div class="history-top"><div><span class="history-person">${escapeHtml(item.person)}</span><div class="history-zone">${escapeHtml(item.zone)}</div></div><time>${escapeHtml(item.date)}</time></div>${item.type === 'permiso' ? `<div class="history-permission">☀️ Ausente con permiso</div><p class="history-reason"><strong>Motivo:</strong> ${escapeHtml(item.reason || 'Sin motivo registrado')}</p>` : `<ul>${(item.tasks || []).map(task => `<li>${escapeHtml(task)}</li>`).join('')}</ul>`}</article>`).join('');
+  list.innerHTML = state.data.history.map(item => {
+    const notes = (item.notes || []).map(note => {
+      const time = note.createdAt ? new Intl.DateTimeFormat('es-EC', { timeZone: 'America/Guayaquil', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(note.createdAt)) : '';
+      return `<div class="history-note"><div><strong>${escapeHtml(note.author || 'Familia')}</strong><time>${escapeHtml(time)}</time></div><p>${escapeHtml(note.text || '').replace(/\n/g, '<br>')}</p></div>`;
+    }).join('');
+    return `<article class="history-item ${item.type === 'permiso' ? 'permission-history' : ''}"><div class="history-top"><div><span class="history-person">${escapeHtml(item.person)}</span><div class="history-zone">${escapeHtml(item.zone)}</div></div><time>${escapeHtml(item.date)}</time></div>${item.type === 'permiso' ? `<div class="history-permission">☀️ Ausente con permiso</div><p class="history-reason"><strong>Motivo:</strong> ${escapeHtml(item.reason || 'Sin motivo registrado')}</p>` : (item.tasks || []).length ? `<ul>${item.tasks.map(task => `<li>${escapeHtml(task)}</li>`).join('')}</ul>` : ''}${notes ? `<div class="history-notes"><strong>📝 Notas de ese día</strong>${notes}</div>` : ''}</article>`;
+  }).join('');
 }
 function formatDate(date) {
   return new Intl.DateTimeFormat('es-EC', { timeZone: 'America/Guayaquil', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(`${date}T12:00:00Z`));
@@ -212,7 +255,12 @@ socket.on('nudge', payload => {
     oscillator.frequency.value = 660; gain.gain.value = .045;
     oscillator.connect(gain); gain.connect(context.destination); oscillator.start(); oscillator.stop(context.currentTime + .18);
   } catch {}
-  if (Notification.permission === 'granted') new Notification('Tareas del Hogar', { body: message, icon: '/icon.svg', tag: `nudge-${Date.now()}` });
+  if ('Notification' in window && Notification.permission === 'granted') {
+    navigator.serviceWorker?.getRegistration().then(async registration => {
+      if (registration && await registration.pushManager.getSubscription()) return;
+      new Notification('Tareas del Hogar', { body: message, icon: '/icon.svg', tag: `nudge-${Date.now()}` });
+    }).catch(() => {});
+  }
 });
 
 document.addEventListener('change', async event => {
@@ -460,11 +508,22 @@ $('#permission-dialog').addEventListener('close', () => { state.pendingAbsenceZo
 $('#notes-dialog').addEventListener('close', () => { state.notesZoneId = null; });
 $('#devices-dialog').addEventListener('close', () => { state.adminPassword = ''; state.deviceProfiles = []; $('#devices-password').value = ''; $('#device-list').innerHTML = ''; });
 $('#notify-btn').addEventListener('click', async () => {
-  if (state.isGuest) return;
-  if (!('Notification' in window)) return say('Este navegador no admite notificaciones.');
-  const permission = await Notification.requestPermission();
-  if (permission === 'granted') { $('#notify-btn').classList.add('enabled'); say('Notificaciones activadas en este teléfono.'); }
-  else say('Activa las notificaciones desde los ajustes del navegador.');
+  if (state.isGuest || !state.profile) return;
+  if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) return say('Este navegador no admite notificaciones push.');
+  if (Notification.permission === 'denied') { updatePushButton(); return say('Las notificaciones están bloqueadas. Habilítalas en los ajustes del navegador.'); }
+  try {
+    const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+    if (permission !== 'granted') { updatePushButton(); return say('No se concedió el permiso para notificaciones.'); }
+    const registration = await navigator.serviceWorker.register('/sw.js');
+    const { publicKey } = await api('/api/vapid-public-key');
+    if (!publicKey) throw new Error('El servidor todavía no tiene configuradas las llaves VAPID.');
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
+    await api('/api/push/subscribe', request('POST', { subscription: subscription.toJSON(), profileId: state.profile.name.toLocaleLowerCase(), deviceId }));
+    await updatePushButton(); say('Notificaciones push activas en este teléfono.');
+  } catch (error) {
+    await updatePushButton(); say(error.message || 'No se pudo activar las notificaciones push.');
+  }
 });
 document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => {
   document.querySelectorAll('.nav-item').forEach(nav => nav.classList.toggle('active', nav === item));
@@ -473,8 +532,10 @@ document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('cl
   $('#today-view').classList.toggle('hidden', !isToday); $('#history-view').classList.toggle('hidden', isToday);
   next.classList.remove('view-enter'); void next.offsetWidth; next.classList.add('view-enter');
 }));
-function runReminderCheck() {
+async function runReminderCheck() {
   if (state.isGuest || !state.profile || !('Notification' in window) || Notification.permission !== 'granted' || !state.data) return;
+  const registration = await navigator.serviceWorker?.getRegistration();
+  if (registration && await registration.pushManager.getSubscription()) return;
   const zone = state.data.zones.find(item => item.id === state.profile.zoneId);
   if (!zone || zone.permission || !zone.tasks.some(task => !task.done)) return;
   const now = new Date(), hour = now.getHours(), minute = now.getMinutes();

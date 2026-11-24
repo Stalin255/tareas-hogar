@@ -2,6 +2,8 @@
   "name": "Tareas del Hogar",
   "short_name": "Tareas Hogar",
   "description": "Organiza y sincroniza las tareas del hogar en familia.",
+  "id": "/",
+  "lang": "es-EC",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
