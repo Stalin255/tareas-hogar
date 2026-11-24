@@ -5,7 +5,7 @@ const EDIT_PASSWORD = 'leo123';
 const storedProfile = (() => { try { return JSON.parse(localStorage.getItem('tareas-profile') || 'null'); } catch { return null; } })();
 const deviceId = localStorage.getItem('tareas-device-id') || (crypto.randomUUID ? crypto.randomUUID() : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 localStorage.setItem('tareas-device-id', deviceId);
-const state = { data: null, profile: null, editTask: null, selectedZone: null, roleZoneId: null, pendingAbsenceZone: null, toastTimer: null, reminderKey: '' };
+const state = { data: null, profile: null, editTask: null, selectedZone: null, roleZoneId: null, pendingAbsenceZone: null, notesZoneId: null, toastTimer: null, reminderKey: '' };
 const icons = { arriba: '🧺', afuera: '🌿', cocina: '🍋', sala: '🛋️', bano: '🧼' };
 const personColors = { made: '#06b6d4', maciel: '#a855f7', leo: '#22c55e', mati: '#3b82f6', libro: '#f97316', angel: '#fb923c', 'libro y angel': '#f97316' };
 
@@ -53,6 +53,7 @@ function render() {
   $('#days-left').textContent = Math.max(0, Math.ceil((cycleStart + 45 * DAY_MS - Date.now()) / DAY_MS));
   $('#cycle-indicator').classList.toggle('hidden', !mine);
   $('#role-change-btn').classList.toggle('hidden', !mine);
+  $('#unlink-btn').classList.toggle('hidden', !mine);
 
   const total = data.zones.reduce((sum, zone) => sum + zone.tasks.length, 0);
   const done = data.zones.reduce((sum, zone) => sum + zone.tasks.filter(task => task.done).length, 0);
@@ -63,6 +64,7 @@ function render() {
   $('#zones').innerHTML = data.zones.map(renderZone).join('');
   document.querySelectorAll('.zone-card').forEach((card, index) => { card.style.animationDelay = `${index * 70}ms`; });
   renderHistory(); renderNotice(); renderDrawAnnouncement(); renderZonePicker();
+  if (state.notesZoneId && $('#notes-dialog').open) renderNotes(state.notesZoneId);
   $('#history-count').textContent = String(data.history.length);
 }
 function renderZone(zone) {
@@ -70,12 +72,15 @@ function renderZone(zone) {
   const pending = zone.tasks.length - complete;
   const progress = zone.tasks.length ? Math.round(complete / zone.tasks.length * 100) : 0;
   const accent = colorFor(zone.person), isOwn = Boolean(state.profile && state.profile.zoneId === zone.id);
-  const streakLabel = (zone.responsables || [zone.person]).map(person => `${person} ${state.data.streaks[person] || 0}`).join(' · ');
+  const responsibleNames = Array.isArray(zone.responsables) ? zone.responsables : (zone.person ? [zone.person] : []);
+  const personLabel = zone.person || 'Sin responsable';
+  const streakLabel = responsibleNames.length ? responsibleNames.map(person => `${person} ${state.data.streaks[person] || 0}`).join(' · ') : 'Sin responsable';
   return `<article class="zone-card ${zone.permission ? 'permission' : ''}" style="--accent:${accent}">
-    <div class="zone-head"><div class="zone-identity"><div class="zone-icon">${icons[zone.id] || '⌂'}</div><div class="zone-copy"><div class="zone-title">${escapeHtml(zone.name)}</div><div class="zone-person">${escapeHtml(zone.person)} <span class="person-streak">🔥 ${escapeHtml(streakLabel)}</span></div></div></div>
+    <div class="zone-head"><div class="zone-identity"><div class="zone-icon">${icons[zone.id] || '⌂'}</div><div class="zone-copy"><div class="zone-title">${escapeHtml(zone.name)}</div><div class="zone-person">${escapeHtml(personLabel)} <span class="person-streak">🔥 ${escapeHtml(streakLabel)}</span></div></div></div>
       <div class="zone-tools"><span class="permission-label">Ausente</span><input class="permission-toggle" type="checkbox" aria-label="Permiso o ausente ${escapeHtml(zone.name)}" data-permission="${escapeHtml(zone.id)}" ${zone.permission ? 'checked' : ''}></div></div>
     <div class="zone-progress"><span>${zone.permission ? 'Con permiso hoy' : pending ? `Faltan ${pending} de ${zone.tasks.length}` : '¡Todo listo!'}</span><strong>${progress}%</strong></div>
     <div class="bar"><i style="width:${progress}%"></i></div>
+    <button class="notes-button" type="button" data-notes-zone="${escapeHtml(zone.id)}">📝 Notas <span>${zone.notes?.length || 0}</span></button>
     ${zone.permission ? `<div class="permission-note">☀️ Con permiso hoy${zone.permissionReason ? ` · ${escapeHtml(zone.permissionReason)}` : ''}</div>` : ''}
     <ul class="task-list">${zone.tasks.map(task => `<li class="task-row ${task.done ? 'done' : ''}">
       <span class="task-check-wrap">${isOwn ? `<input type="checkbox" class="task-check" aria-label="Marcar ${escapeHtml(task.text)}" data-toggle-zone="${escapeHtml(zone.id)}" data-task="${escapeHtml(task.id)}" ${task.done ? 'checked' : ''}>` : `<input type="checkbox" class="task-check blocked-check" aria-label="${task.done ? 'Completada' : 'Pendiente'}: ${escapeHtml(task.text)}" ${task.done ? 'checked' : ''} disabled><button type="button" class="task-lock-hit" data-locked-check aria-label="Solo puedes marcar las actividades de tu propio rol"></button>`}</span>
@@ -96,6 +101,17 @@ function renderNotice() {
   banner.classList.remove('hidden');
   banner.innerHTML = `<div><strong>⚠️ Ayer no hiciste (${escapeHtml(notice.zone)}):</strong> ${notice.tasks.map(escapeHtml).join(' · ')}</div><button id="dismiss-notice" class="mini-button" aria-label="Cerrar aviso">×</button>`;
   $('#dismiss-notice').onclick = async () => { await api('/api/notice/dismiss', request('POST', { person: state.profile.name })).catch(() => {}); };
+}
+function renderNotes(zoneId) {
+  const zone = state.data?.zones.find(item => item.id === zoneId);
+  if (!zone) return;
+  $('#notes-title').textContent = `Notas · ${zone.name}`;
+  $('#notes-about').textContent = `Sobre: ${zone.person || 'Sin responsable'}`;
+  const notes = zone.notes || [];
+  $('#notes-list').innerHTML = notes.length ? notes.map(note => {
+    const time = new Intl.DateTimeFormat('es-EC', { timeZone: 'America/Guayaquil', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(note.createdAt));
+    return `<article class="note-item"><div class="note-meta"><strong>${escapeHtml(note.author)}</strong><time>${escapeHtml(time)}</time></div><div class="note-about">Sobre ${escapeHtml(note.about || zone.person || 'Sin responsable')}</div><p>${escapeHtml(note.text).replace(/\n/g, '<br>')}</p></article>`;
+  }).join('') : '<div class="empty-notes">Aún no hay notas en este rol.</div>';
 }
 function renderDrawAnnouncement() {
   const banner = $('#draw-banner'), draw = state.data.ultimoSorteo;
@@ -185,6 +201,12 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#role-change-btn')) {
     $('#role-password').value = ''; $('#role-password-error').classList.add('hidden'); $('#role-password-dialog').showModal();
   }
+  if (event.target.closest('#unlink-btn')) $('#unlink-dialog').showModal();
+  const notes = event.target.closest('[data-notes-zone]');
+  if (notes) {
+    state.notesZoneId = notes.dataset.notesZone; $('#note-form').reset(); $('#note-error').classList.add('hidden');
+    renderNotes(state.notesZoneId); $('#notes-dialog').showModal();
+  }
   const closeButton = event.target.closest('[data-close-dialog]');
   if (closeButton) closeDialog(document.getElementById(closeButton.dataset.closeDialog));
 });
@@ -216,6 +238,18 @@ $('#role-form').addEventListener('submit', async event => {
     state.data = result.state; syncProfile(result.profile); closeDialog($('#role-dialog')); $('#role-password').value = ''; render();
   } catch (error) { $('#role-error').textContent = error.message; $('#role-error').classList.remove('hidden'); }
 });
+$('#unlink-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const previousZoneId = state.profile?.zoneId;
+  try {
+    const result = await api('/api/profile/unlink', request('POST', { deviceId }));
+    state.data = result.state; state.profile = null;
+    localStorage.removeItem('tareas-profile'); socket.emit('forget-profile');
+    state.selectedZone = previousZoneId || state.data.zones[0]?.id || null;
+    closeDialog($('#unlink-dialog')); render();
+    setTimeout(() => { renderZonePicker(); $('#profile-error').classList.add('hidden'); $('#profile-dialog').showModal(); }, 280);
+  } catch (error) { say(error.message); }
+});
 $('#task-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (state.editTask && $('#task-password').value !== EDIT_PASSWORD) { $('#task-error').textContent = 'Contraseña incorrecta.'; $('#task-error').classList.remove('hidden'); return; }
@@ -235,6 +269,14 @@ $('#permission-form').addEventListener('submit', async event => {
     state.pendingAbsenceZone = null; closeDialog($('#permission-dialog'));
   } catch (error) { $('#permission-error').textContent = error.message; $('#permission-error').classList.remove('hidden'); }
 });
+$('#note-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const text = $('#note-text').value.trim();
+  try {
+    const result = await api(`/api/zone/${encodeURIComponent(state.notesZoneId)}/notes`, request('POST', { deviceId, text }));
+    state.data = result.state; $('#note-text').value = ''; $('#note-error').classList.add('hidden'); render(); say('Nota guardada.');
+  } catch (error) { $('#note-error').textContent = error.message; $('#note-error').classList.remove('hidden'); }
+});
 $('#task-close').addEventListener('click', () => closeDialog($('#task-dialog')));
 $('#task-cancel').addEventListener('click', () => closeDialog($('#task-dialog')));
 for (const dialog of document.querySelectorAll('dialog')) {
@@ -242,6 +284,7 @@ for (const dialog of document.querySelectorAll('dialog')) {
   dialog.addEventListener('cancel', event => { if (dialog.id === 'profile-dialog') event.preventDefault(); else { event.preventDefault(); closeDialog(dialog); } });
 }
 $('#permission-dialog').addEventListener('close', () => { state.pendingAbsenceZone = null; });
+$('#notes-dialog').addEventListener('close', () => { state.notesZoneId = null; });
 $('#notify-btn').addEventListener('click', async () => {
   if (!('Notification' in window)) return say('Este navegador no admite notificaciones.');
   const permission = await Notification.requestPermission();

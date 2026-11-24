@@ -1,6 +1,6 @@
 # Tareas del Hogar
 
-PWA familiar con sincronización Socket.io y roles protegidos. Render sirve la aplicación por HTTPS y el proceso Node.js escucha por HTTP en el puerto que Render proporciona.
+PWA familiar con sincronización Socket.io, roles protegidos, desvinculación de perfiles y notas compartidas por zona. Render sirve la aplicación por HTTPS y el proceso Node.js escucha por HTTP en el puerto que Render proporciona.
 
 ## Desarrollo local
 

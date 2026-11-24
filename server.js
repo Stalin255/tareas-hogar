@@ -26,8 +26,8 @@ function initialState() {
   ].map(([name, person, color, tasks]) => {
     const id = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     return {
-    id, name, person, color, permission: false, permissionReason: '',
-    ...(name === 'BAÑO' ? { responsables: ['Libro', 'Angel'] } : {}),
+    id, name, person, color, permission: false, permissionReason: '', notes: [],
+    ...(name === 'BAÑO' ? { responsables: ['Libro', 'Angel'], personasPermitidas: ['Libro', 'Angel'] } : {}),
     tasks: tasks.map((text, i) => ({ id: `${id}-${i + 1}`, text, done: false, markedBy: null, markedAt: null }))
   }; });
   return { date: dateInZone(new Date()), zones, streaks: {}, history: [], notices: {}, cicloInicio: ecuadorDateTime(new Date()), perfilesBloqueados: {}, ultimoSorteo: null };
@@ -72,9 +72,10 @@ function normalizeState(saved) {
     const bathroom = normalized.zones.find(zone => zone.id === 'bano');
     if (bathroom) {
       bathroom.responsables ||= ['Libro', 'Angel'];
+      bathroom.personasPermitidas ||= ['Libro', 'Angel'];
       bathroom.person ||= 'Libro y Angel';
     }
-    for (const zone of normalized.zones) zone.permissionReason ||= '';
+    for (const zone of normalized.zones) { zone.permissionReason ||= ''; zone.notes ||= []; }
     if (!normalized.cicloInicio) normalized.cicloInicio = ecuadorDateTime(new Date());
     if (!normalized.perfilesBloqueados || Array.isArray(normalized.perfilesBloqueados)) normalized.perfilesBloqueados = {};
     if (!Object.hasOwn(normalized, 'ultimoSorteo')) normalized.ultimoSorteo = null;
@@ -149,6 +150,19 @@ function canMarkZone(deviceId, zone) {
     : profile?.name === zone?.person;
   return Boolean(profile && zone && profile.zoneId === zone.id && isResponsible);
 }
+function releaseZoneAssignment(zone, name) {
+  if (!zone) return;
+  if (Array.isArray(zone.responsables)) {
+    zone.responsables = zone.responsables.filter(person => person.toLocaleLowerCase() !== String(name).toLocaleLowerCase());
+    zone.person = zone.responsables.join(' y ');
+  } else if (zone.person === name) zone.person = '';
+}
+function assignZone(zone, name) {
+  if (Array.isArray(zone.responsables)) {
+    if (!zone.responsables.some(person => person.toLocaleLowerCase() === name.toLocaleLowerCase())) zone.responsables.push(name);
+    zone.person = zone.responsables.join(' y ');
+  } else zone.person = name;
+}
 
 app.post('/api/profile/claim', (req, res) => {
   drawRolesIfDue();
@@ -162,13 +176,14 @@ app.post('/api/profile/claim', (req, res) => {
   if (!name || !zone) return res.status(400).json({ error: 'Elige tu nombre y una zona para registrar este dispositivo.' });
   const otherDevice = Object.values(state.perfilesBloqueados).find(entry => entry.name.toLocaleLowerCase() === name.toLocaleLowerCase());
   if (otherDevice) return res.status(409).json({ error: 'Este nombre ya está vinculado a otro dispositivo. Para cambiar de celular, elimina su registro en data.json.' });
-  if (zone.responsables && !zone.responsables.some(person => person.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+  const permittedNames = zone.personasPermitidas || zone.responsables;
+  if (permittedNames && !permittedNames.some(person => person.toLocaleLowerCase() === name.toLocaleLowerCase())) {
     return res.status(403).json({ error: `El rol ${zone.name} está reservado para ${zone.responsables.join(' y ')}.` });
   }
   const zoneLock = Object.values(state.perfilesBloqueados).find(entry => entry.zoneId === zone.id);
   if (zoneLock && !zone.responsables) return res.status(409).json({ error: 'Esta zona ya está vinculada a otro dispositivo.' });
 
-  if (!zone.responsables) zone.person = name;
+  assignZone(zone, name);
   if (!state.streaks[name]) state.streaks[name] = 0;
   state.perfilesBloqueados[deviceId] = { deviceId, name, zoneId: zone.id, cicloInicio: state.cicloInicio };
   sendState();
@@ -184,17 +199,29 @@ app.post('/api/profile/change', (req, res) => {
   if (!name || !zone) return res.status(400).json({ error: 'Nombre y zona son obligatorios.' });
   const duplicateName = Object.values(state.perfilesBloqueados).find(entry => entry.deviceId !== deviceId && entry.name.toLocaleLowerCase() === name.toLocaleLowerCase());
   if (duplicateName) return res.status(409).json({ error: 'Ese nombre ya está vinculado a otro dispositivo.' });
-  if (zone.responsables && !zone.responsables.some(person => person.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+  const permittedNames = zone.personasPermitidas || zone.responsables;
+  if (permittedNames && !permittedNames.some(person => person.toLocaleLowerCase() === name.toLocaleLowerCase())) {
     return res.status(403).json({ error: `El rol ${zone.name} está reservado para ${zone.responsables.join(' y ')}.` });
   }
   const occupiedZone = Object.values(state.perfilesBloqueados).find(entry => entry.deviceId !== deviceId && entry.zoneId === zone.id);
   if (occupiedZone && !zone.responsables) return res.status(409).json({ error: 'Esa zona ya está vinculada a otro dispositivo.' });
+  const oldZone = zoneById(profile.zoneId);
+  releaseZoneAssignment(oldZone, profile.name);
+  assignZone(zone, name);
   profile.name = name;
   profile.zoneId = zone.id;
-  if (!zone.responsables) zone.person = name;
   if (!state.streaks[name]) state.streaks[name] = 0;
   sendState();
   res.json({ profile: { name, zoneId: zone.id, deviceId }, state: publicState() });
+});
+app.post('/api/profile/unlink', (req, res) => {
+  const deviceId = String(req.body?.deviceId || '').trim().slice(0, 100);
+  const profile = profileForDevice(deviceId);
+  if (!profile) return res.status(404).json({ error: 'Este dispositivo no tiene un perfil vinculado.' });
+  releaseZoneAssignment(zoneById(profile.zoneId), profile.name);
+  delete state.perfilesBloqueados[deviceId];
+  sendState();
+  res.json({ state: publicState() });
 });
 app.post('/api/permission', (req, res) => {
   const zone = zoneById(req.body?.zoneId);
@@ -210,6 +237,19 @@ app.post('/api/notice/dismiss', (req, res) => {
   const person = String(req.body?.person || '').trim();
   if (person) delete state.notices[person];
   sendState(); res.json(publicState());
+});
+app.post('/api/zone/:zoneId/notes', (req, res) => {
+  const zone = zoneById(req.params.zoneId);
+  const profile = profileForDevice(req.body?.deviceId);
+  const text = String(req.body?.text || '').trim().slice(0, 600);
+  if (!zone) return res.status(404).json({ error: 'Zona no encontrada.' });
+  if (!profile) return res.status(403).json({ error: 'Vincula un perfil antes de escribir una nota.' });
+  if (!text) return res.status(400).json({ error: 'Escribe una nota antes de guardarla.' });
+  const note = { id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, author: profile.name, about: zone.person || 'Sin responsable', text, createdAt: ecuadorDateTime(new Date()) };
+  zone.notes.unshift(note);
+  zone.notes = zone.notes.slice(0, 200);
+  sendState();
+  res.json({ note, state: publicState() });
 });
 app.post('/api/task/toggle', (req, res) => {
   const zone = zoneById(req.body?.zoneId);
@@ -243,8 +283,8 @@ function rollover() {
   if (state.date === today) return;
   const yesterday = state.date;
   for (const zone of state.zones) {
-    const persons = zone.responsables || [zone.person];
-    const personLabel = zone.person;
+    const persons = (zone.responsables || [zone.person]).filter(Boolean);
+    const personLabel = zone.person || 'Sin responsable';
     if (zone.permission) {
       if (zone.permissionReason) state.history.unshift({ date: yesterday, person: personLabel, zone: zone.name, type: 'permiso', reason: zone.permissionReason, tasks: [] });
     } else {
@@ -274,6 +314,7 @@ function drawRolesIfDue(now = Date.now()) {
   const eligible = ['arriba', 'afuera', 'sala'].map(zoneById).filter(Boolean);
   if (eligible.length !== 3) return false;
   const original = eligible.map(zone => zone.person);
+  if (original.some(person => !String(person || '').trim()) || new Set(original).size !== original.length) return false;
   let selected = null;
   for (let attempt = 0; attempt < 300 && !selected; attempt++) {
     const candidate = [...original];
@@ -313,6 +354,7 @@ async function start() {
       socket.emit('profile', { name: profile.name, zoneId: profile.zoneId, deviceId });
       socket.emit('state', publicState());
     });
+    socket.on('forget-profile', () => { delete socket.data.deviceId; delete socket.data.person; });
     socket.on('toggle-task', (payload, acknowledge) => {
       const zone = zoneById(payload?.zoneId);
       const task = zone?.tasks.find(item => item.id === payload?.taskId);
