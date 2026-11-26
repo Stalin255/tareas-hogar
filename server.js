@@ -234,7 +234,7 @@ async function sendPushToProfile(profileId, { title, body, url = '/' } = {}) {
       delivered++;
     } catch (error) {
       const statusCode = error.statusCode || error.status;
-      console.warn('No se pudo enviar push:', statusCode || error.message);
+      console.error('[Web Push] Falló el envío:', { profileId: key, statusCode: statusCode || null, error });
       if (statusCode === 404 || statusCode === 410) { removePushSubscriptionsForDevice(entry.deviceId); removedExpired = true; }
     }
   }
@@ -269,12 +269,18 @@ async function sendWhatsAppMessage(message) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chatId: WHATSAPP_GROUP_ID, message })
     });
-    if (!response.ok) return { sent: false, reason: `Green-API respondió HTTP ${response.status}` };
-    const result = await response.json().catch(() => ({}));
-    return { sent: true, messageId: result.idMessage || null };
+    const responseText = await response.text();
+    let result = responseText;
+    try { result = responseText ? JSON.parse(responseText) : {}; } catch { /* Keep the raw response for diagnostics. */ }
+    if (!response.ok) {
+      const failure = { sent: false, status: response.status, statusText: response.statusText, response: result };
+      console.error('[Green-API] Falló el envío:', failure);
+      return { ...failure, reason: `Green-API respondió HTTP ${response.status}` };
+    }
+    return { sent: true, status: response.status, response: result, messageId: result?.idMessage || null };
   } catch (error) {
-    console.warn('No se pudo enviar el mensaje de WhatsApp:', error.message);
-    return { sent: false, reason: 'No se pudo conectar con Green-API' };
+    console.error('[Green-API] Error de conexión/envío:', error);
+    return { sent: false, reason: 'No se pudo conectar con Green-API', error: error?.stack || error?.message || String(error) };
   }
 }
 function notifyNote(profile, zone, text) {
@@ -363,41 +369,44 @@ async function sendPushPendingReminders() {
   }
 
   let sent = 0;
+  const profileResults = [];
   for (const [profileId, item] of pending) {
     const uniqueTasks = [...new Set(item.tasks)];
-    sent += await sendPushToProfile(profileId, {
+    const profileSent = await sendPushToProfile(profileId, {
       title: `Tareas pendientes · ${item.zone}`,
       body: uniqueTasks.length > 2 ? `${uniqueTasks.slice(0, 2).join(', ')} y ${uniqueTasks.length - 2} más` : uniqueTasks.join(', '),
       url: '/'
     });
+    sent += profileSent;
+    profileResults.push({ profileId, subscriptions: state.pushSubscriptions[profileId]?.length || 0, sent: profileSent });
   }
-  return { sent, profiles: pending.size };
+  return { enabled: PUSH_ENABLED, sent, profiles: pending.size, profileResults };
 }
 
 async function runPendingReminderCron() {
   rollover();
-  const [push, whatsapp] = await Promise.all([
-    sendPushPendingReminders(),
-    sendWhatsAppPendingReminder()
-  ]);
-  const pushLog = { enabled: PUSH_ENABLED, profiles: push.profiles, sent: push.sent };
-  console.log('[CRON] WhatsApp:', whatsapp);
-  console.log('[CRON] Push:', pushLog);
-  const reason = push.profiles === 0
-    ? 'Todo completado'
-    : (whatsapp.reason || (!PUSH_ENABLED ? 'Push no configurado' : null));
-  return {
-    ok: true,
-    pushSent: push.sent,
-    whatsappSent: whatsapp.sent,
-    reason
-  };
+  try {
+    const push = await sendPushPendingReminders();
+    console.log('[CRON] Push:', push);
+  } catch (error) {
+    console.error('[CRON] Push: error inesperado:', error);
+  }
+  try {
+    const whatsapp = await sendWhatsAppPendingReminder();
+    console.log('[CRON] WhatsApp:', whatsapp);
+  } catch (error) {
+    console.error('[CRON] WhatsApp: error inesperado:', error);
+  }
 }
 
 app.post('/api/whatsapp/remind-pending', async (req, res) => {
-  if (!CRON_SECRET) return res.status(503).json({ error: 'CRON_SECRET no está configurado.' });
-  if (!isValidCronSecret(req)) return res.status(401).json({ error: 'Secreto de cron no válido.' });
-  res.json(await runPendingReminderCron());
+  if (!CRON_SECRET || !isValidCronSecret(req)) {
+    console.error('[CRON] WhatsApp: solicitud no autorizada o CRON_SECRET sin configurar.');
+    return res.status(200).type('text/plain').send('OK');
+  }
+  try { await runPendingReminderCron(); }
+  catch (error) { console.error('[CRON] Error inesperado:', error); }
+  return res.status(200).type('text/plain').send('OK');
 });
 
 app.get('/api/vapid-public-key', (_req, res) => {
@@ -421,9 +430,13 @@ app.post('/api/push/subscribe', async (req, res) => {
   res.json({ ok: true, profileId, devices: entries.length });
 });
 app.post('/api/push/remind-pending', async (req, res) => {
-  if (!CRON_SECRET) return res.status(503).json({ error: 'CRON_SECRET no está configurado.' });
-  if (!isValidCronSecret(req)) return res.status(401).json({ error: 'Secreto de cron no válido.' });
-  res.json(await runPendingReminderCron());
+  if (!CRON_SECRET || !isValidCronSecret(req)) {
+    console.error('[CRON] Push: solicitud no autorizada o CRON_SECRET sin configurar.');
+    return res.status(200).type('text/plain').send('OK');
+  }
+  try { await runPendingReminderCron(); }
+  catch (error) { console.error('[CRON] Error inesperado:', error); }
+  return res.status(200).type('text/plain').send('OK');
 });
 
 app.post('/api/profile/claim', (req, res) => {
