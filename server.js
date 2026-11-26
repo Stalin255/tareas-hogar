@@ -29,6 +29,8 @@ const redis = process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_RE
   ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN })
   : null;
 let persistenceQueue = Promise.resolve();
+let reminderCheckRunning = false;
+const localReminderSlots = new Map();
 
 function initialState() {
   const zones = [
@@ -154,7 +156,10 @@ app.use(express.static(path.join(ROOT, 'public')));
 let server;
 let io;
 
-app.get('/health', (_req, res) => res.status(200).json({ ok: true }));
+app.get('/health', (_req, res) => {
+  res.status(200).type('text/plain').send('OK');
+  void checkScheduledReminders().catch(error => console.error('[AUTO-REMINDER] Error al comprobar turnos:', error));
+});
 app.get('/api/state', (_req, res) => res.json(publicState()));
 app.get('/api/config', (_req, res) => res.json({ date: dateInZone(new Date()), time: timeInZone(new Date()), timezone: TZ }));
 
@@ -283,19 +288,27 @@ async function sendWhatsAppMessage(message) {
     return { sent: false, reason: 'No se pudo conectar con Green-API', error: error?.stack || error?.message || String(error) };
   }
 }
+async function runNotificationSafely(label, send) {
+  try {
+    const result = await send();
+    console.log(`[INSTANT-NOTIFICATION] ${label}:`, result);
+  } catch (error) {
+    console.error(`[INSTANT-NOTIFICATION] ${label}:`, error);
+  }
+}
 function notifyNote(profile, zone, text) {
   const message = `📝 *Nueva nota en Tareas del Hogar*\n\n👤 *${profile.name}* (${zone.name}) escribió:\n_"${text}"_`;
-  void Promise.allSettled([
-    sendWhatsAppMessage(message),
-    sendPushToOtherProfiles(profile.name, { title: `📝 Nota de ${profile.name} (${zone.name})`, body: text, url: '/' })
-  ]).then(results => results.forEach(result => { if (result.status === 'rejected') console.warn('Falló un aviso de nueva nota:', result.reason?.message || result.reason); }));
+  void Promise.all([
+    runNotificationSafely('WhatsApp nota', () => sendWhatsAppMessage(message)),
+    runNotificationSafely('Web Push nota', () => sendPushToOtherProfiles(profile.name, { title: `📝 Nota de ${profile.name} (${zone.name})`, body: text, url: '/' }))
+  ]).catch(error => console.error('[INSTANT-NOTIFICATION] Error general de nota:', error));
 }
 function notifyAbsence(profile, zone, reason) {
   const message = `🚫 *Aviso de ausencia en Tareas del Hogar*\n\n👤 *${profile.name}* (${zone.name}) activó permiso hoy.\n📌 *Motivo:* ${reason}`;
-  void Promise.allSettled([
-    sendWhatsAppMessage(message),
-    sendPushToOtherProfiles(profile.name, { title: `🚫 Ausencia de ${profile.name} (${zone.name})`, body: reason, url: '/' })
-  ]).then(results => results.forEach(result => { if (result.status === 'rejected') console.warn('Falló un aviso de ausencia:', result.reason?.message || result.reason); }));
+  void Promise.all([
+    runNotificationSafely('WhatsApp ausencia', () => sendWhatsAppMessage(message)),
+    runNotificationSafely('Web Push ausencia', () => sendPushToOtherProfiles(profile.name, { title: `🚫 Ausencia de ${profile.name} (${zone.name})`, body: reason, url: '/' }))
+  ]).catch(error => console.error('[INSTANT-NOTIFICATION] Error general de ausencia:', error));
 }
 
 async function sendWhatsAppPendingReminder() {
@@ -383,19 +396,71 @@ async function sendPushPendingReminders() {
   return { enabled: PUSH_ENABLED, sent, profiles: pending.size, profileResults };
 }
 
-async function runPendingReminderCron() {
+async function runPendingReminderCron(logPrefix = '[CRON]') {
   rollover();
   try {
     const push = await sendPushPendingReminders();
-    console.log('[CRON] Push:', push);
+    console.log(`${logPrefix} Push:`, push);
   } catch (error) {
-    console.error('[CRON] Push: error inesperado:', error);
+    console.error(`${logPrefix} Push: error inesperado:`, error);
   }
   try {
     const whatsapp = await sendWhatsAppPendingReminder();
-    console.log('[CRON] WhatsApp:', whatsapp);
+    console.log(`${logPrefix} WhatsApp:`, whatsapp);
   } catch (error) {
-    console.error('[CRON] WhatsApp: error inesperado:', error);
+    console.error(`${logPrefix} WhatsApp: error inesperado:`, error);
+  }
+}
+
+function ecuadorReminderTime(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return {
+    date: `${values.year}-${values.month}-${values.day}`,
+    hour: Number(values.hour),
+    minute: Number(values.minute)
+  };
+}
+
+async function claimReminderSlot(date, hour) {
+  const slot = `${date}-${hour}`;
+  const slotKey = `reminder:slot:${slot}`;
+  if (redis) {
+    try {
+      if ((await redis.get(slotKey)) != null) return false;
+      // NX makes the check-and-claim atomic across server instances.
+      const claimed = await redis.set(slotKey, '1', { ex: 86400, nx: true });
+      return claimed === 'OK' || claimed === true;
+    } catch (error) {
+      console.error('[AUTO-REMINDER] No se pudo usar el bloqueo Redis:', error);
+    }
+  }
+
+  const now = Date.now();
+  for (const [key, expiresAt] of localReminderSlots) if (expiresAt <= now) localReminderSlots.delete(key);
+  if (localReminderSlots.has(slot)) return false;
+  localReminderSlots.set(slot, now + 86400 * 1000);
+  return true;
+}
+
+async function checkScheduledReminders() {
+  if (reminderCheckRunning || !state) return;
+  reminderCheckRunning = true;
+  try {
+    const { date, hour, minute } = ecuadorReminderTime(new Date());
+    const scheduledHours = [10, 12, 15, 18, 21];
+    if (!scheduledHours.includes(hour) || minute < 0 || minute > 14) return;
+    if (!(await claimReminderSlot(date, hour))) return;
+    console.log(`[AUTO-REMINDER] Ejecutando turno ${date} ${hour}:00`);
+    await runPendingReminderCron('[AUTO-REMINDER]');
+  } catch (error) {
+    console.error('[AUTO-REMINDER] Falló el turno programado:', error);
+  } finally {
+    reminderCheckRunning = false;
   }
 }
 
@@ -720,6 +785,10 @@ async function start() {
     console.log(`Tareas del Hogar escuchando por HTTP en 0.0.0.0:${PORT}`);
     if (redis) console.log(`Persistencia Redis habilitada (${REDIS_KEY}).`);
     else console.log('Persistencia local activa en data.json.');
+    void checkScheduledReminders().catch(error => console.error('[AUTO-REMINDER] Error inicial:', error));
+    setInterval(() => {
+      void checkScheduledReminders().catch(error => console.error('[AUTO-REMINDER] Error del intervalo:', error));
+    }, 60000).unref();
   });
 }
 start().catch(err => { console.error('No se pudo iniciar el servidor:', err); process.exit(1); });
