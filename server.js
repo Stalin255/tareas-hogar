@@ -455,7 +455,7 @@ async function checkScheduledReminders() {
     const scheduledHours = [10, 12, 15, 18, 21];
     if (!scheduledHours.includes(hour) || minute < 0 || minute > 14) return;
     if (!(await claimReminderSlot(date, hour))) return;
-    console.log(`[AUTO-REMINDER] Ejecutando turno ${date} ${hour}:00`);
+    console.log(`[AUTO-REMINDER] Turno ${date} ${hour}:00`);
     await runPendingReminderCron('[AUTO-REMINDER]');
   } catch (error) {
     console.error('[AUTO-REMINDER] Falló el turno programado:', error);
