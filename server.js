@@ -346,11 +346,58 @@ app.get('/api/whatsapp/groups', async (req, res) => {
   }
 });
 
+async function sendPushPendingReminders() {
+  const pending = new Map();
+  for (const zone of state.zones) {
+    if (zone.permission) continue;
+    const tasks = zone.tasks.filter(task => !task.done).map(task => task.text);
+    if (!tasks.length) continue;
+    const people = zone.responsables || (zone.person ? [zone.person] : []);
+    for (const person of people) {
+      const key = pushProfileId(person);
+      if (!key) continue;
+      const previous = pending.get(key);
+      if (previous) previous.tasks.push(...tasks);
+      else pending.set(key, { zone: zone.name, tasks: [...tasks] });
+    }
+  }
+
+  let sent = 0;
+  for (const [profileId, item] of pending) {
+    const uniqueTasks = [...new Set(item.tasks)];
+    sent += await sendPushToProfile(profileId, {
+      title: `Tareas pendientes · ${item.zone}`,
+      body: uniqueTasks.length > 2 ? `${uniqueTasks.slice(0, 2).join(', ')} y ${uniqueTasks.length - 2} más` : uniqueTasks.join(', '),
+      url: '/'
+    });
+  }
+  return { sent, profiles: pending.size };
+}
+
+async function runPendingReminderCron() {
+  rollover();
+  const [push, whatsapp] = await Promise.all([
+    sendPushPendingReminders(),
+    sendWhatsAppPendingReminder()
+  ]);
+  const pushLog = { enabled: PUSH_ENABLED, profiles: push.profiles, sent: push.sent };
+  console.log('[CRON] WhatsApp:', whatsapp);
+  console.log('[CRON] Push:', pushLog);
+  const reason = push.profiles === 0
+    ? 'Todo completado'
+    : (whatsapp.reason || (!PUSH_ENABLED ? 'Push no configurado' : null));
+  return {
+    ok: true,
+    pushSent: push.sent,
+    whatsappSent: whatsapp.sent,
+    reason
+  };
+}
+
 app.post('/api/whatsapp/remind-pending', async (req, res) => {
   if (!CRON_SECRET) return res.status(503).json({ error: 'CRON_SECRET no está configurado.' });
   if (!isValidCronSecret(req)) return res.status(401).json({ error: 'Secreto de cron no válido.' });
-  rollover();
-  res.json(await sendWhatsAppPendingReminder());
+  res.json(await runPendingReminderCron());
 });
 
 app.get('/api/vapid-public-key', (_req, res) => {
@@ -376,37 +423,7 @@ app.post('/api/push/subscribe', async (req, res) => {
 app.post('/api/push/remind-pending', async (req, res) => {
   if (!CRON_SECRET) return res.status(503).json({ error: 'CRON_SECRET no está configurado.' });
   if (!isValidCronSecret(req)) return res.status(401).json({ error: 'Secreto de cron no válido.' });
-  rollover();
-  const pending = new Map();
-  for (const zone of state.zones) {
-    if (zone.permission) continue;
-    const tasks = zone.tasks.filter(task => !task.done).map(task => task.text);
-    if (!tasks.length) continue;
-    const people = zone.responsables || (zone.person ? [zone.person] : []);
-    for (const person of people) {
-      const key = pushProfileId(person);
-      if (!key) continue;
-      const previous = pending.get(key);
-      if (previous) previous.tasks.push(...tasks);
-      else pending.set(key, { name: person, zone: zone.name, tasks: [...tasks] });
-    }
-  }
-  let sent = 0;
-  for (const [profileId, item] of pending) {
-    const uniqueTasks = [...new Set(item.tasks)];
-    sent += await sendPushToProfile(profileId, {
-      title: `Tareas pendientes · ${item.zone}`,
-      body: uniqueTasks.length > 2 ? `${uniqueTasks.slice(0, 2).join(', ')} y ${uniqueTasks.length - 2} más` : uniqueTasks.join(', '),
-      url: '/'
-    });
-  }
-  const whatsapp = await sendWhatsAppPendingReminder();
-  res.json({
-    ok: true,
-    date: dateInZone(new Date()),
-    webPush: { enabled: PUSH_ENABLED, profiles: pending.size, notificationsSent: sent },
-    whatsapp
-  });
+  res.json(await runPendingReminderCron());
 });
 
 app.post('/api/profile/claim', (req, res) => {
